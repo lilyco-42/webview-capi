@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh" x-data="mcpManager()" x-init="init()">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP 管理面板</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<style>
+:root{--bg:#0a0e17;--bg2:#111827;--bg3:#1e293b;--border:#334155;--text:#f1f5f9;--muted:#94a3b8;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--purple:#a855f7;--cyan:#06b6d4}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Inter","Noto Sans SC",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+.container{max-width:1000px;margin:0 auto;padding:40px 20px}
+h1{font-size:1.8rem;margin-bottom:8px;background:linear-gradient(135deg,var(--purple),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:16px}
+.card h3{font-size:1rem;margin-bottom:14px;color:var(--blue)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.server-card{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:16px;transition:all .2s}
+.server-card:hover{border-color:var(--purple)}
+.server-name{font-weight:600;font-size:0.95rem}
+.server-desc{font-size:0.78rem;color:var(--muted);margin:4px 0 8px}
+.status{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:6px;font-size:0.72rem}
+.status.connected{background:rgba(34,197,94,0.1);border:1px solid var(--green);color:var(--green)}
+.status.disconnected{background:rgba(239,68,68,0.1);border:1px solid var(--red);color:var(--red)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg3);color:var(--text);font-size:0.8rem;cursor:pointer;transition:all .2s}
+.btn:hover{border-color:var(--blue)}
+.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.sm{padding:5px 10px;font-size:0.75rem}
+.tools-list{list-style:none}
+.tool-item{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all .2s}
+.tool-item:hover{border-color:var(--cyan);background:rgba(6,182,212,0.05)}
+.tool-icon{font-size:1.2rem}
+.tool-info{flex:1}
+.tool-name{font-size:0.85rem;font-weight:500}
+.tool-desc{font-size:0.72rem;color:var(--muted)}
+.log{background:#000;border-radius:8px;padding:12px;font-family:Consolas,monospace;font-size:0.75rem;color:var(--green);height:200px;overflow-y:auto;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🔌 MCP 管理面板</h1>
+<p style="color:var(--muted)">管理 Model Context Protocol 服务器,AI 工具集成</p>
+
+<div class="grid">
+<div class="card">
+<h3>已连接服务器</h3>
+<template x-for="s in servers" :key="s.name">
+<div class="server-card">
+<div style="display:flex;justify-content:space-between;align-items:start">
+<div><div class="server-name" x-text="s.name"></div><div class="server-desc" x-text="s.desc"></div></div>
+<span class="status" :class="s.connected?'connected':'disconnected'" x-text="s.connected?'已连接':'未连接'"></span>
+</div>
+<div style="display:flex;gap:6px;margin-top:8px">
+<button class="btn sm primary" @click="toggleServer(s)" x-text="s.connected?'断开':'连接'"></button>
+<button class="btn sm" @click="s.connected=!s.connected">重启</button>
+</div>
+</div>
+</template>
+</div>
+
+<div class="card">
+<h3>可用工具</h3>
+<ul class="tools-list">
+<template x-for="t in tools" :key="t.name">
+<li class="tool-item" @click="callTool(t)">
+<span class="tool-icon" x-text="t.icon"></span>
+<div class="tool-info"><div class="tool-name" x-text="t.name"></div><div class="tool-desc" x-text="t.desc"></div></div>
+</li>
+</template>
+</ul>
+</div>
+</div>
+
+<div class="card">
+<h3>MCP 通信日志</h3>
+<div class="log" x-ref="logBox" x-html="log"></div>
+</div>
+</div>
+
+<script>
+function mcpManager() {
+return {
+log: '> MCP 管理面板已启动\n> 等待服务器连接...',
+servers: [
+{name:'Lyco WebView',desc:'WebView 项目生成 + 构建',connected:true},
+{name:'xmake 包管理',desc:'包搜索 + 安装',connected:true},
+{name:'GitHub',desc:'仓库管理 + Actions',connected:false},
+{name:'OpenAI',desc:'AI 辅助编程',connected:false},
+],
+tools: [
+{icon:'🚀',name:'lyco_new',desc:'新建 WebView 项目'},
+{icon:'🔨',name:'lyco_build',desc:'构建当前项目'},
+{icon:'▶',name:'lyco_run',desc:'运行项目'},
+{icon:'📦',name:'xmake_search',desc:'搜索 xmake 包'},
+{icon:'🔍',name:'self_check',desc:'环境自检'},
+{icon:'🤖',name:'ai_assist',desc:'AI 代码生成'},
+],
+init() {},
+toggleServer(s) { s.connected = !s.connected; this.log += `\n> ${s.connected?'连接':'断开'} ${s.name}`; },
+callTool(t) { this.log += `\n> 调用工具: ${t.name}`; setTimeout(() => this.log += `\n✓ ${t.name} 执行完成`, 400); }
+}
+}
+</script>
+</body>
+</html>

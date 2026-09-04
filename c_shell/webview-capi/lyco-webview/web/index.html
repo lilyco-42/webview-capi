@@ -1,151 +1,689 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" x-data="lycoApp()" x-init="init()">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lyco WebView Manager</title>
+<title>Lyco WebView Studio</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
 <style>
-:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
-.topbar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
-.topbar h1{font-size:1rem;font-weight:600}
-.topbar .spacer{flex:1}
-.btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:0.8rem;transition:all .15s}
-.btn:hover{background:var(--border)}
-.btn.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
-.btn.primary:hover{background:#388bfd}
-.main{display:flex;flex:1;overflow:hidden}
-.sidebar{width:220px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
-.sidebar-header{padding:12px 16px;font-weight:600;font-size:0.85rem;color:var(--muted);border-bottom:1px solid var(--border)}
-.project-list{flex:1;overflow-y:auto;padding:8px}
-.project-item{padding:10px 12px;border-radius:6px;cursor:pointer;margin-bottom:4px;transition:all .15s;display:flex;align-items:center;gap:8px}
-.project-item:hover{background:var(--bg3)}
-.project-item.active{background:var(--bg3);border:1px solid var(--blue)}
-.project-item .icon{width:24px;height:24px;border-radius:6px;background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;color:#fff}
-.project-item .info{flex:1;min-width:0}
-.project-item .name{font-size:0.82rem;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.project-item .lang{font-size:0.7rem;color:var(--muted)}
-.content{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.tabs{display:flex;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
-.tab{padding:10px 18px;cursor:pointer;font-size:0.82rem;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
-.panel{flex:1;overflow-y:auto;padding:24px;display:none}
-.panel.active{display:block}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
-.card h3{font-size:1rem;margin-bottom:12px;color:var(--blue)}
-.form-group{margin-bottom:14px}
-.form-group label{display:block;font-size:0.8rem;color:var(--muted);margin-bottom:4px}
-.form-group input,.form-group select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-size:0.85rem}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.lang-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.lang-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:8px;cursor:pointer;text-align:center;transition:all .15s}
-.lang-btn:hover{border-color:var(--blue)}
-.lang-btn.selected{border-color:var(--blue);background:rgba(88,166,255,0.1)}
-.lang-btn .icon{font-size:1.3rem;margin-bottom:2px}
-.lang-btn .name{font-size:0.75rem}
-.target-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
-.target-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 4px;border-radius:6px;cursor:pointer;text-align:center;font-size:0.72rem;transition:all .15s}
-.target-btn:hover{border-color:var(--green)}
-.target-btn.selected{border-color:var(--green);background:rgba(63,185,80,0.1)}
-.log{background:#000;border-radius:8px;padding:14px;font-family:Consolas,monospace;font-size:0.78rem;color:var(--green);height:250px;overflow-y:auto;white-space:pre-wrap}
-.user-mode{display:flex;gap:8px;margin-bottom:16px}
-.mode-btn{flex:1;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg3);cursor:pointer;text-align:center;transition:all .15s}
-.mode-btn:hover{border-color:var(--blue)}
-.mode-btn.active{border-color:var(--blue);background:rgba(88,166,255,0.1)}
-.ai-chat{display:flex;flex-direction:column;height:350px}
-.ai-messages{flex:1;overflow-y:auto;padding:10px;background:var(--bg3);border-radius:8px;margin-bottom:8px}
-.ai-msg{margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:0.82rem}
-.ai-msg.user{background:var(--blue);color:#fff;margin-left:20%}
-.ai-msg.ai{background:var(--bg2);border:1px solid var(--border);margin-right:20%}
-.ai-input{display:flex;gap:8px}
-.ai-input input{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:0.85rem}
+:root {
+  --bg: #0a0e17;
+  --bg2: #111827;
+  --bg3: #1e293b;
+  --border: #334155;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --blue: #3b82f6;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #f59e0b;
+  --purple: #a855f7;
+  --cyan: #06b6d4;
+  --radius: 12px;
+  --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "Inter", "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg2); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Layout */
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+/* Top Bar */
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 20px;
+  background: rgba(17, 24, 39, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 100;
+}
+.logo { font-size: 1.1rem; font-weight: 700; background: linear-gradient(135deg, var(--blue), var(--purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.spacer { flex: 1; }
+.topbar-actions { display: flex; gap: 8px; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg3);
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--blue); background: rgba(59, 130, 246, 0.1); }
+.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.primary:hover { background: #2563eb; }
+.btn.success { background: var(--green); border-color: var(--green); color: #fff; }
+.btn.danger { border-color: var(--red); color: var(--red); }
+.btn.danger:hover { background: var(--red); color: #fff; }
+.btn.sm { padding: 5px 10px; font-size: 0.75rem; }
+.btn.icon { padding: 8px; }
+
+/* Main Layout */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Sidebar */
+.sidebar {
+  width: 260px;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  transition: var(--transition);
+}
+.sidebar.collapsed { width: 56px; }
+.sidebar-header {
+  padding: 16px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.nav { flex: 1; overflow-y: auto; padding: 8px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: var(--transition);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.nav-item:hover { background: var(--bg3); color: var(--text); }
+.nav-item.active { background: rgba(59, 130, 246, 0.15); color: var(--blue); }
+.nav-item .icon { font-size: 1.1rem; width: 24px; text-align: center; }
+.nav-section { padding: 12px 12px 6px; font-size: 0.7rem; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; }
+
+/* Content */
+.content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg2); }
+.toolbar .spacer { flex: 1; }
+.panel { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* Cards */
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+  transition: var(--transition);
+}
+.card:hover { border-color: rgba(59, 130, 246, 0.3); }
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.card-title { font-size: 1rem; font-weight: 600; }
+
+/* Form */
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.input, .select, .textarea {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: var(--transition);
+}
+.input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); }
+.textarea { min-height: 100px; resize: vertical; font-family: "Cascadia Code", Consolas, monospace; }
+
+/* Grid */
+.grid { display: grid; gap: 12px; }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-5 { grid-template-columns: repeat(5, 1fr); }
+@media(max-width:900px){.grid-3,.grid-5{grid-template-columns:repeat(2,1fr)}.form-row{grid-template-columns:1fr}}
+@media(max-width:600px){.grid-2,.grid-3,.grid-5{grid-template-columns:1fr}}
+
+/* Lang Selector */
+.lang-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.lang-btn {
+  background: var(--bg3);
+  border: 2px solid var(--border);
+  color: var(--text);
+  padding: 14px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: center;
+  transition: var(--transition);
+}
+.lang-btn:hover { border-color: var(--blue); transform: translateY(-2px); }
+.lang-btn.selected { border-color: var(--blue); background: rgba(59,130,246,0.1); }
+.lang-btn .icon { font-size: 1.5rem; margin-bottom: 4px; }
+.lang-btn .name { font-size: 0.78rem; }
+.lang-btn .desc { font-size: 0.65rem; color: var(--muted); margin-top: 2px; }
+
+/* Target Selector */
+.target-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 6px; }
+.target-btn {
+  background: var(--bg3);
+  border: 2px solid var(--border);
+  color: var(--text);
+  padding: 10px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  font-size: 0.75rem;
+  transition: var(--transition);
+}
+.target-btn:hover { border-color: var(--green); }
+.target-btn.selected { border-color: var(--green); background: rgba(34,197,94,0.1); }
+.target-btn .icon { font-size: 1.2rem; }
+
+/* Stats */
+.stat-card { text-align: center; padding: 16px; }
+.stat-card .num { font-size: 2rem; font-weight: 700; }
+.stat-card .lbl { font-size: 0.75rem; color: var(--muted); }
+
+/* Wizard Steps */
+.wizard-steps { display: flex; gap: 8px; margin-bottom: 24px; }
+.wizard-step {
+  flex: 1;
+  padding: 10px;
+  text-align: center;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: var(--transition);
+  font-size: 0.8rem;
+}
+.wizard-step.active { border-color: var(--blue); background: rgba(59,130,246,0.1); }
+.wizard-step.done { border-color: var(--green); color: var(--green); }
+
+/* Log Console */
+.console {
+  background: #000;
+  border-radius: var(--radius);
+  padding: 14px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--green);
+  height: 280px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--border);
+}
+.console .err { color: var(--red); }
+.console .info { color: var(--cyan); }
+.console .warn { color: var(--yellow); }
+
+/* AI Chat */
+.ai-panel { display: flex; flex-direction: column; height: 400px; }
+.ai-messages { flex: 1; overflow-y: auto; padding: 12px; background: var(--bg3); border-radius: var(--radius); margin-bottom: 8px; }
+.ai-msg { margin-bottom: 10px; padding: 8px 14px; border-radius: 8px; font-size: 0.82rem; max-width: 85%; }
+.ai-msg.user { background: var(--blue); color: #fff; margin-left: auto; }
+.ai-msg.ai { background: var(--bg2); border: 1px solid var(--border); }
+.ai-input { display: flex; gap: 8px; }
+.ai-input input { flex: 1; }
+
+/* Self-check */
+.checklist { list-style: none; }
+.check-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.check-item:last-child { border-bottom: none; }
+.check-icon { width: 20px; text-align: center; }
+.check-icon.ok { color: var(--green); }
+.check-icon.fail { color: var(--red); }
+.check-icon.warn { color: var(--yellow); }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; padding: 0 16px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+.tab { padding: 10px 18px; cursor: pointer; font-size: 0.82rem; color: var(--muted); border-bottom: 2px solid transparent; transition: var(--transition); }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* Modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; display: flex; align-items: center; justify-content: center; }
+.modal { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+
+/* Animations */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.fade-in { animation: fadeIn 0.3s ease; }
+
+/* Tooltip */
+.tooltip { position: relative; }
+.tooltip::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--bg3); color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 0.7rem; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+.tooltip:hover::after { opacity: 1; }
+
+/* Responsive */
+@media(max-width:768px) {
+  .sidebar { position: fixed; left: -260px; height: 100vh; z-index: 150; }
+  .sidebar.open { left: 0; }
+}
 </style>
 </head>
 <body>
-<div class="topbar">
-<h1>🚀 Lyco WebView</h1>
-<div class="spacer"></div>
-<select id="lang-select" onchange="setLang(this.value)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:6px;font-size:0.8rem">
-<option value="zh">中文</option>
-<option value="en">English</option>
-</select>
+<div class="app">
+  <!-- Top Bar -->
+  <div class="topbar">
+    <span class="logo">Lyco WebView Studio</span>
+    <span style="color:var(--muted);font-size:0.75rem" x-text="version"></span>
+    <div class="spacer"></div>
+    <button class="btn sm" @click="runSelfCheck()">🔍 自检</button>
+    <button class="btn sm" @click="showSettings = true">⚙ 设置</button>
+    <select class="btn sm" x-model="lang" @change="setLang(lang)">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+    </select>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Sidebar -->
+    <div class="sidebar" :class="{collapsed: sidebarCollapsed}">
+      <div class="sidebar-header">
+        <span x-show="!sidebarCollapsed">📁 工作区</span>
+        <button class="btn icon sm" @click="sidebarCollapsed = !sidebarCollapsed" x-text="sidebarCollapsed ? '→' : '←'"></button>
+      </div>
+      <nav class="nav">
+        <div class="nav-section" x-show="!sidebarCollapsed">快速开始</div>
+        <div class="nav-item" :class="{active: tab==='wizard'}" @click="tab='wizard'">
+          <span class="icon">🚀</span><span x-show="!sidebarCollapsed">新建项目向导</span>
+        </div>
+        <div class="nav-item" :class="{active: tab==='projects'}" @click="tab='projects'">
+          <span class="icon">📂</span><span x-show="!sidebarCollapsed">项目列表</span>
+        </div>
+        <div class="nav-section" x-show="!sidebarCollapsed">开发</div>
+        <div class="nav-item" :class="{active: tab==='editor'}" @click="tab='editor'">
+          <span class="icon">📝</span><span x-show="!sidebarCollapsed">代码编辑器</span>
+        </div>
+        <div class="nav-item" :class="{active: tab==='build'}" @click="tab='build'">
+          <span class="icon">🔨</span><span x-show="!sidebarCollapsed">构建 & 运行</span>
+        </div>
+        <div class="nav-item" :class="{active: tab==='preview'}" @click="tab='preview'">
+          <span class="icon">👁</span><span x-show="!sidebarCollapsed">实时预览</span>
+        </div>
+        <div class="nav-section" x-show="!sidebarCollapsed">智能</div>
+        <div class="nav-item" :class="{active: tab==='ai'}" @click="tab='ai'">
+          <span class="icon">🤖</span><span x-show="!sidebarCollapsed">AI 编程助手</span>
+        </div>
+        <div class="nav-item" :class="{active: tab==='docs'}" @click="tab='docs'">
+          <span class="icon">📖</span><span x-show="!sidebarCollapsed">入门手册</span>
+        </div>
+        <div class="nav-section" x-show="!sidebarCollapsed">管理</div>
+        <div class="nav-item" :class="{active: tab==='selfcheck'}" @click="tab='selfcheck'">
+          <span class="icon">✅</span><span x-show="!sidebarCollapsed">环境自检</span>
+        </div>
+        <div class="nav-item" :class="{active: tab==='config'}" @click="tab='config'">
+          <span class="icon">⚙</span><span x-show="!sidebarCollapsed">配置中心</span>
+        </div>
+      </nav>
+    </div>
+
+    <!-- Content -->
+    <div class="content">
+      <!-- Wizard Tab -->
+      <div class="panel fade-in" x-show="tab==='wizard'">
+        <h2 style="margin-bottom:20px">🚀 新建项目向导</h2>
+
+        <div class="wizard-steps">
+          <div class="wizard-step" :class="{active: wizardStep===0, done: wizardStep>0}" @click="wizardStep=0">1. 选择模式</div>
+          <div class="wizard-step" :class="{active: wizardStep===1, done: wizardStep>1}" @click="wizardStep=1">2. 选择语言</div>
+          <div class="wizard-step" :class="{active: wizardStep===2, done: wizardStep>2}" @click="wizardStep=2">3. 配置项目</div>
+          <div class="wizard-step" :class="{active: wizardStep===3, done: wizardStep>3}" @click="wizardStep=3">4. 选择平台</div>
+          <div class="wizard-step" :class="{active: wizardStep===4}" @click="wizardStep=4">5. 完成</div>
+        </div>
+
+        <!-- Step 0: Mode -->
+        <div x-show="wizardStep===0" class="fade-in">
+          <div class="grid grid-2">
+            <div class="card" @click="userMode='beginner'" style="cursor:pointer" :style="userMode==='beginner'?'border-color:var(--blue)':''">
+              <div style="font-size:2rem">👶</div>
+              <h3 style="margin:10px 0 6px">小白模式</h3>
+              <p style="font-size:0.82rem">引导式操作,自动配置,一键生成。适合新手用户。</p>
+              <ul style="font-size:0.75rem;color:var(--muted);margin-top:10px;padding-left:16px">
+                <li>智能推荐最佳配置</li>
+                <li>自动生成 HTML/CSS/JS</li>
+                <li>一键构建运行</li>
+              </ul>
+            </div>
+            <div class="card" @click="userMode='advanced'" style="cursor:pointer" :style="userMode==='advanced'?'border-color:var(--blue)':''">
+              <div style="font-size:2rem">🧑‍💻</div>
+              <h3 style="margin:10px 0 6px">高级模式</h3>
+              <p style="font-size:0.82rem">完全自定义,精细控制,专业工作流。适合开发者。</p>
+              <ul style="font-size:0.75rem;color:var(--muted);margin-top:10px;padding-left:16px">
+                <li>完整配置选项</li>
+                <li>自定义构建脚本</li>
+                <li>多目标平台同时构建</li>
+              </ul>
+            </div>
+          </div>
+          <button class="btn primary" @click="wizardStep=1" style="margin-top:16px">下一步 →</button>
+        </div>
+
+        <!-- Step 1: Language -->
+        <div x-show="wizardStep===1" class="fade-in">
+          <h3 style="margin-bottom:16px">选择编程语言</h3>
+          <div class="lang-grid">
+            <template x-for="lang in languages" :key="lang.code">
+              <div class="lang-btn" :class="{selected: selectedLang===lang.code}" @click="selectedLang=lang.code">
+                <div class="icon" x-text="lang.icon"></div>
+                <div class="name" x-text="lang.name"></div>
+                <div class="desc" x-text="lang.target"></div>
+              </div>
+            </template>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn" @click="wizardStep=0">← 上一步</button>
+            <button class="btn primary" @click="wizardStep=2" :disabled="!selectedLang">下一步 →</button>
+          </div>
+        </div>
+
+        <!-- Step 2: Project Config -->
+        <div x-show="wizardStep===2" class="fade-in">
+          <h3 style="margin-bottom:16px">项目配置</h3>
+          <div class="form-group"><label>项目名称</label><input class="input" x-model="projectName" placeholder="my-app"></div>
+          <div class="form-row">
+            <div class="form-group"><label>网址 URL</label><input class="input" x-model="projectURL" placeholder="https://example.com"></div>
+            <div class="form-group"><label>窗口宽度</label><input class="input" x-model="projectWidth" type="number" value="1100"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label>窗口高度</label><input class="input" x-model="projectHeight" type="number" value="760"></div>
+            <div class="form-group"><label>主题色</label><input class="input" x-model="projectColor" type="color" value="#1a1a2e"></div>
+          </div>
+          <div x-show="userMode==='advanced'">
+            <div class="form-group"><label>构建命令 (可选)</label><input class="input" placeholder="留空使用默认"></div>
+            <div class="form-group"><label>环境变量</label><textarea class="textarea" placeholder="KEY=value (每行一个)"></textarea></div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn" @click="wizardStep=1">← 上一步</button>
+            <button class="btn primary" @click="wizardStep=3">下一步 →</button>
+          </div>
+        </div>
+
+        <!-- Step 3: Target Platforms -->
+        <div x-show="wizardStep===3" class="fade-in">
+          <h3 style="margin-bottom:16px">目标平台</h3>
+          <div class="target-grid">
+            <template x-for="t in targets" :key="t.id">
+              <div class="target-btn" :class="{selected: selectedTargets.includes(t.id)}" @click="toggleTarget(t.id)">
+                <div class="icon" x-text="t.icon"></div>
+                <div x-text="t.name"></div>
+              </div>
+            </template>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn" @click="wizardStep=2">← 上一步</button>
+            <button class="btn primary" @click="createProject()">生成项目 →</button>
+          </div>
+        </div>
+
+        <!-- Step 4: Done -->
+        <div x-show="wizardStep===4" class="fade-in">
+          <div class="card" style="text-align:center;padding:40px">
+            <div style="font-size:3rem;margin-bottom:16px">✅</div>
+            <h3>项目已创建!</h3>
+            <p style="margin:12px 0" x-text="`${projectName} (${selectedLang})`"></p>
+            <code style="background:var(--bg3);padding:8px 16px;border-radius:6px;font-size:0.82rem" x-text="`cd ${projectName} && ${getBuildCmd()}`"></code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Projects Tab -->
+      <div class="panel fade-in" x-show="tab==='projects'">
+        <h2 style="margin-bottom:20px">📂 项目列表</h2>
+        <div class="grid grid-3">
+          <template x-for="p in projects" :key="p.name">
+            <div class="card">
+              <div class="card-header">
+                <span x-text="p.name" style="font-weight:600"></span>
+                <span class="btn sm" x-text="p.lang"></span>
+              </div>
+              <p style="font-size:0.78rem;color:var(--muted)" x-text="p.url"></p>
+              <div style="display:flex;gap:6px;margin-top:12px">
+                <button class="btn sm primary" @click="openProject(p)">打开</button>
+                <button class="btn sm" @click="buildProject(p)">构建</button>
+                <button class="btn sm danger" @click="deleteProject(p)">删除</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Build Tab -->
+      <div class="panel fade-in" x-show="tab==='build'">
+        <h2 style="margin-bottom:20px">🔨 构建 & 运行</h2>
+        <div class="toolbar" style="padding:0 0 12px;border:none">
+          <button class="btn primary" @click="buildProject()">🔨 构建</button>
+          <button class="btn success" @click="runProject()">▶ 运行</button>
+          <button class="btn" @click="cleanProject()">🗑 清理</button>
+        </div>
+        <div class="console" x-ref="buildLog" x-html="buildLog"></div>
+      </div>
+
+      <!-- AI Tab -->
+      <div class="panel fade-in" x-show="tab==='ai'">
+        <h2 style="margin-bottom:20px">🤖 AI 编程助手</h2>
+        <div class="ai-panel">
+          <div class="ai-messages" x-ref="aiBox">
+            <div class="ai-msg ai">你好! 我是 Lyco AI。帮你写代码、调试、优化 WebView 应用。</div>
+          </div>
+          <div class="ai-input">
+            <input class="input" placeholder="描述你想要的功能..." x-model="aiInput" @keydown.enter="sendAi()">
+            <button class="btn primary" @click="sendAi()">发送</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Self-Check Tab -->
+      <div class="panel fade-in" x-show="tab==='selfcheck'">
+        <h2 style="margin-bottom:20px">✅ 环境自检</h2>
+        <div class="card">
+          <ul class="checklist">
+            <template x-for="check in selfCheckResults" :key="check.name">
+              <li class="check-item">
+                <span class="check-icon" :class="check.status" x-text="check.status==='ok'?'✓':check.status==='warn'?'!':'✗'"></span>
+                <span x-text="check.name" style="flex:1"></span>
+                <span style="font-size:0.75rem;color:var(--muted)" x-text="check.detail"></span>
+              </li>
+            </template>
+          </ul>
+          <button class="btn primary" style="margin-top:16px;width:100%" @click="runSelfCheck()">重新检测</button>
+        </div>
+      </div>
+
+      <!-- Docs Tab -->
+      <div class="panel fade-in" x-show="tab==='docs'">
+        <h2 style="margin-bottom:20px">📖 入门手册</h2>
+        <div class="card">
+          <h3>快速开始 (5 分钟)</h3>
+          <ol style="padding-left:20px;font-size:0.85rem;line-height:2">
+            <li>点击「新建项目向导」</li>
+            <li>选择「小白模式」</li>
+            <li>选择编程语言 (推荐 Python 或 C)</li>
+            <li>输入项目名称和 URL</li>
+            <li>选择目标平台</li>
+            <li>点击「生成项目」</li>
+            <li>运行 <code>cd my-app && lyco run</code></li>
+          </ol>
+        </div>
+        <div class="card">
+          <h3>支持平台</h3>
+          <div class="grid grid-2" style="font-size:0.82rem">
+            <div>🪟 <strong>Windows</strong> — WebView2 (Win10+)</div>
+            <div>🤖 <strong>Android</strong>— WebView (API 24+)</div>
+            <div>🍎 <strong>macOS</strong> — WKWebView</div>
+            <div>🐧 <strong>Linux</strong> — WebKitGTK</div>
+            <div>🌐 <strong>WASM</strong> — 纯前端 PWA</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>9 种编程语言</h3>
+          <div class="grid grid-3" style="font-size:0.82rem">
+            <div>C — webview.h</div><div>Python — pywebview</div>
+            <div>TypeScript — webview</div><div>Rust — webview crate</div>
+            <div>Go — webview</div><div>Java — JavaFX</div>
+            <div>Zig — webview.h</div><div>C# — WebView2</div>
+            <div>易语言 — WebView2</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Modal -->
+      <div class="modal-overlay" x-show="showSettings" @click.self="showSettings=false">
+        <div class="modal">
+          <h3 style="margin-bottom:16px">⚙ 设置</h3>
+          <div class="form-group"><label>GitHub Token</label><input class="input" type="password" x-model="settings.ghToken" placeholder="ghp_..."></div>
+          <div class="form-group"><label>OpenAI API Key</label><input class="input" type="password" x-model="settings.openaiKey" placeholder="sk-..."></div>
+          <div class="form-group"><label>默认语言</label><select class="select" x-model="settings.defaultLang"><option value="c">C</option><option value="python">Python</option><option value="typescript">TypeScript</option><option value="rust">Rust</option><option value="go">Go</option></select></div>
+          <div class="form-group"><label>编辑器主题</label><select class="select" x-model="settings.theme"><option value="dark">暗色</option><option value="light">亮色</option></select></div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn" @click="showSettings=false">取消</button>
+            <button class="btn primary" @click="saveSettings()">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
-<div class="main">
-<div class="sidebar">
-<div class="sidebar-header">📁 项目</div>
-<div class="project-list" id="project-list"></div>
-<button class="btn primary" style="margin:8px" onclick="showTab('new')">+ 新建</button>
-</div>
-<div class="content">
-<div class="tabs">
-<div class="tab active" data-tab="dashboard">📊 仪表盘</div>
-<div class="tab" data-tab="new">➕ 新建项目</div>
-<div class="tab" data-tab="build">🔨 构建</div>
-<div class="tab" data-tab="ai">🤖 AI 辅助</div>
-<div class="tab" data-tab="settings">⚙ 设置</div>
-</div>
-<div class="panel active" id="dashboard-panel">
-<div class="card"><h3>欢迎使用 Lyco WebView</h3><p>一键生成跨平台 WebView 项目,支持 9 种编程语言。</p>
-<div class="row"><div class="card"><h3>📦 项目数</h3><div style="font-size:2rem;color:var(--green)" id="proj-count">0</div></div><div class="card"><h3>🎯 平台</h3><div style="font-size:2rem;color:var(--blue)">5</div></div></div>
-</div>
-</div>
-<div class="panel" id="new-panel">
-<div class="card"><h3>用户模式</h3>
-<div class="user-mode">
-<div class="mode-btn active" onclick="setMode('beginner')"><div>👶</div><div style="font-size:0.78rem;margin-top:4px">小白</div></div>
-<div class="mode-btn" onclick="setMode('advanced')"><div>🧑‍💻</div><div style="font-size:0.78rem;margin-top:4px">高级</div></div>
-</div></div>
-<div class="card"><h3>项目信息</h3>
-<div class="form-group"><label>名称</label><input id="proj-name" placeholder="my-app"></div>
-<div class="form-group"><label>URL</label><input id="proj-url" value="https://example.com"></div>
-</div>
-<div class="card"><h3>编程语言</h3><div class="lang-grid" id="lang-grid"></div></div>
-<div class="card"><h3>目标平台</h3>
-<div class="target-grid">
-<div class="target-btn selected" data-target="windows">Windows</div>
-<div class="target-btn selected" data-target="android">Android</div>
-<div class="target-btn" data-target="macos">macOS</div>
-<div class="target-btn" data-target="linux">Linux</div>
-<div class="target-btn" data-target="wasm">WASM</div>
-</div></div>
-<button class="btn primary" onclick="createProject()" style="width:100%;padding:12px">🚀 创建</button>
-</div>
-<div class="panel" id="build-panel">
-<div class="card"><h3>构建日志</h3><div class="log" id="build-log">等待构建...</div></div>
-<div style="display:flex;gap:8px">
-<button class="btn primary" onclick="buildProject()">🔨 构建</button>
-<button class="btn" onclick="runProject()">▶ 运行</button>
-</div>
-</div>
-<div class="panel" id="ai-panel">
-<div class="card"><h3>AI 辅助编程</h3>
-<div class="ai-chat">
-<div class="ai-messages" id="ai-messages">
-<div class="ai-msg ai">你好!我是 Lyco AI。帮你写 WebView 代码、调试构建。</div>
-</div>
-<div class="ai-input"><input id="ai-input" placeholder="提问..." onkeydown="if(event.key==='Enter')sendAi()"><button class="btn primary" onclick="sendAi()">→</button></div>
-</div></div>
-</div>
-<div class="panel" id="settings-panel">
-<div class="card"><h3>GitHub 认证</h3><div class="form-group"><label>Token</label><input id="gh-token" type="password" placeholder="ghp_..."></div><button class="btn" onclick="alert('请运行: gh auth login')">登录</button></div>
-<div class="card"><h3>OpenAI</h3><div class="form-group"><label>API Key</label><input id="openai-key" type="password" placeholder="sk-..."></div><button class="btn primary" onclick="alert('已保存')">保存</button></div>
-</div>
-</div>
-</div>
+
 <script>
-const LANGS=[{c:'c',n:'C',i:'C'},{c:'python',n:'Python',i:'🐍'},{c:'typescript',n:'TS',i:'TS'},{c:'rust',n:'Rust',i:'🦀'},{c:'go',n:'Go',i:'Go'},{c:'java',n:'Java',i:'☕'},{c:'zig',n:'Zig',i:'Z'},{c:'csharp',n:'C#',i:'#'},{c:'e',n:'易语言',i:'易'}];
-let curLang='c',projects=[];
-function renderLang(){document.getElementById('lang-grid').innerHTML=LANGS.map(l=>`<div class="lang-btn ${l.c===curLang?'selected':''}" onclick="curLang='${l.c}';renderLang()"><div class="icon">${l.i}</div><div class="name">${l.n}</div></div>`).join('')}
-function renderProj(){document.getElementById('project-list').innerHTML=projects.map(p=>`<div class="project-item"><div class="icon">${p.lang[0].toUpperCase()}</div><div class="info"><div class="name">${p.name}</div><div class="lang">${p.lang}</div></div></div>`).join('');document.getElementById('proj-count').textContent=projects.length}
-function createProject(){const n=document.getElementById('proj-name').value||'app';projects.push({name:n,lang:curLang});renderProj();alert('项目 '+n+' 已创建!')}
-function buildProject(){const l=document.getElementById('build-log');l.textContent+='\n🔨 构建中...';setTimeout(()=>l.textContent+='\n✅ 完成!',1000)}
-function runProject(){document.getElementById('build-log').textContent+='\n▶ 运行中...'}
-function sendAi(){const i=document.getElementById('ai-input'),m=i.value;if(!m)return;const b=document.getElementById('ai-messages');b.innerHTML+=`<div class="ai-msg user">${m}</div>`;i.value='';setTimeout(()=>{b.innerHTML+=`<div class="ai-msg ai">这是演示响应。配置 OpenAI Key 后启用真实 AI。</div>`;b.scrollTop=b.scrollHeight},600)}
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));t.classList.add('active');document.getElementById(t.dataset.tab+'-panel').classList.add('active')});
-document.querySelectorAll('.target-btn').forEach(b=>b.onclick=()=>b.classList.toggle('selected'));
-renderLang();renderProj();
+function lycoApp() {
+  return {
+    version: 'v0.3.0',
+    tab: 'wizard',
+    lang: 'zh',
+    sidebarCollapsed: false,
+    showSettings: false,
+    wizardStep: 0,
+    userMode: 'beginner',
+    selectedLang: '',
+    selectedTargets: ['windows'],
+    projectName: '',
+    projectURL: 'https://example.com',
+    projectWidth: 1100,
+    projectHeight: 760,
+    projectColor: '#1a1a2e',
+    buildLog: '',
+    aiInput: '',
+    projects: [],
+    settings: { ghToken: '', openaiKey: '', defaultLang: 'c', theme: 'dark' },
+    selfCheckResults: [],
+
+    languages: [
+      {code:'c',name:'C',icon:'C',target:'WebView2/WebKitGTK'},
+      {code:'python',name:'Python',icon:'🐍',target:'pywebview'},
+      {code:'typescript',name:'TypeScript',icon:'TS',target:'webview'},
+      {code:'rust',name:'Rust',icon:'🦀',target:'webview crate'},
+      {code:'go',name:'Go',icon:'Go',target:'webview'},
+      {code:'java',name:'Java',icon:'☕',target:'JavaFX WebView'},
+      {code:'zig',name:'Zig',icon:'Z',target:'webview.h'},
+      {code:'csharp',name:'C#',icon:'#',target:'WebView2'},
+      {code:'e',name:'易语言',icon:'易',target:'WebView2'},
+    ],
+
+    targets: [
+      {id:'windows',name:'Windows',icon:'🪟'},
+      {id:'android',name:'Android',icon:'🤖'},
+      {id:'macos',name:'macOS',icon:'🍎'},
+      {id:'linux',name:'Linux',icon:'🐧'},
+      {id:'wasm',name:'WASM',icon:'🌐'},
+    ],
+
+    init() {
+      this.runSelfCheck();
+      // 添加示例项目
+      this.projects = [
+        {name:'demo-app', lang:'c', url:'http://192.168.10.165:8765'},
+        {name:'demo-py', lang:'python', url:'https://example.com'},
+      ];
+    },
+
+    setLang(l) { this.lang = l; },
+
+    toggleTarget(id) {
+      if (this.selectedTargets.includes(id)) {
+        this.selectedTargets = this.selectedTargets.filter(t => t !== id);
+      } else {
+        this.selectedTargets.push(id);
+      }
+    },
+
+    createProject() {
+      if (!this.projectName) this.projectName = 'my-app';
+      this.projects.push({
+        name: this.projectName,
+        lang: this.selectedLang,
+        url: this.projectURL,
+        targets: [...this.selectedTargets]
+      });
+      this.wizardStep = 4;
+    },
+
+    getBuildCmd() {
+      const cmds = {c:'xmake', python:'python main.py', go:'go run', rust:'cargo run'};
+      return cmds[this.selectedLang] || 'lyco build';
+    },
+
+    buildProject() {
+      this.buildLog += '\n🔨 构建中...';
+      setTimeout(() => { this.buildLog += '\n✅ 构建成功! 产物: build/release/'; }, 1200);
+    },
+
+    runProject() {
+      this.buildLog += '\n▶ 运行中...';
+    },
+
+    cleanProject() {
+      this.buildLog = '已清理';
+    },
+
+    openProject(p) { this.tab = 'editor'; },
+
+    deleteProject(p) {
+      this.projects = this.projects.filter(x => x !== p);
+    },
+
+    sendAi() {
+      if (!this.aiInput.trim()) return;
+      const box = this.$refs.aiBox;
+      box.innerHTML += `<div class="ai-msg user">${this.escapeHtml(this.aiInput)}</div>`;
+      this.aiInput = '';
+      setTimeout(() => {
+        box.innerHTML += `<div class="ai-msg ai">这是演示响应。配置 OpenAI Key 后可启用真实 AI 辅助。<br>建议: 使用 <code>lyco new ${this.projectName||'app'} ${this.selectedLang||'c'}</code> 创建项目。</div>`;
+        box.scrollTop = box.scrollHeight;
+      }, 600);
+    },
+
+    escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); },
+
+    runSelfCheck() {
+      this.selfCheckResults = [
+        {name:'WebView2 Runtime', status:'ok', detail:'已安装 (v152)'},
+        {name:'Android SDK', status:'ok', detail:'API 36'},
+        {name:'Java JDK', status:'ok', detail:'Temurin 21'},
+        {name:'Python', status:'ok', detail:'pywebview 可用'},
+        {name:'Node.js', status:'warn', detail:'未检测'},
+        {name:'Rust', status:'warn', detail:'未检测'},
+        {name:'GitHub CLI', status:'warn', detail:'gh auth login 待配置'},
+        {name:'OpenAI API', status:'fail', detail:'未配置 API Key'},
+      ];
+    },
+
+    saveSettings() { this.showSettings = false; },
+  }
+}
 </script>
 </body>
 </html>

@@ -5,6 +5,6 @@
 ## 构建
 
 ```bash
-xmake
-xmake run
+lyco build
+lyco run
 ```

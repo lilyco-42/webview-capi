@@ -1,9 +1,14 @@
 [package]
 name = "lyco"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
-description = "一键生成跨平台 WebView 项目"
+description = "一键生成跨平台 WebView 项目 (动态链接架构)"
 license = "MIT"
 repository = "https://github.com/lilyco-42/webview-capi"
 
 [dependencies]
+libloading = "0.8"
+
+[[bin]]
+name = "lyco"
+path = "src/main.rs"

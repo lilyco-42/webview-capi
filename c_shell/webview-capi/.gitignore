@@ -1,0 +1,19 @@
+# Build artifacts
+target/
+build/
+out/
+*.exe
+*.dll
+*.lib
+*.so
+*.pdb
+
+# Nested repos (should be separate)
+../release/
+../webview-mini/
+../xmake-mirror/
+
+# Temp
+*.log
+*.tmp
+.DS_Store

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Application xmlns:uap="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+             xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+             xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+             xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10">
+  <Identity Name="lilyco-42.Lyco-WebView-Studio" Publisher="CN=lilyco-42" Version="1.0.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Lyco WebView Studio</DisplayName>
+    <PublisherDisplayName>lilyco-42</PublisherDisplayName>
+    <Description>跨平台 WebView 项目生成器</Description>
+    <Logo>assets\logo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="zh-CN" />
+  </Resources>
+  <Applications>
+    <Application Id="LycoApp" Executable="lyco.exe">
+      <uap:VisualElements DisplayName="Lyco WebView Studio" Description="一键生成跨平台 WebView 项目"
+                          Square150x150Logo="assets\logo150.png" Square44x44Logo="assets\logo44.png" BackgroundColor="transparent">
+        <uap:DefaultTile Wide310x150Logo="assets\logo310.png" Square310x310Logo="assets\logo310.png" />
+        <uap:SplashScreen Image="assets\splash.png" BackgroundColor="#0a0e17" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="lyco-project">
+            <uap:DisplayName>Lyco Project</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.lyco</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Application>

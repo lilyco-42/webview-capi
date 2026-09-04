@@ -355,7 +355,24 @@ fn print_help() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 { print_help(); return; }
+
+    // 双击检测:无参数时启动 Web UI
+    if args.len() < 2 {
+        ensure_initialized();
+        let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
+        println!("🌐 Lyco WebView Studio 启动中...");
+        println!("   打开浏览器访问: http://localhost:{port}");
+        println!("   按 Ctrl+C 退出");
+        // 自动打开浏览器
+        let _ = Command::new("cmd")
+            .args(["/c", "start", &format!("http://localhost:{port}")])
+            .spawn();
+        let _ = Command::new("python")
+            .args(["-m", "http.server", &port])
+            .current_dir(web_dir())
+            .status();
+        return;
+    }
 
     let cmd = args[1].as_str();
     let cmd_args: &[String] = &args[2..];

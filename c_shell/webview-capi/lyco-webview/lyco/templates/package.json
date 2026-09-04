@@ -1,0 +1,8 @@
+{
+  "name": "{NAME}",
+  "version": "1.0.0",
+  "main": "main.ts",
+  "scripts": { "dev": "tsx main.ts" },
+  "dependencies": { "webview": "^1.0.0" },
+  "devDependencies": { "tsx": "^4.0.0" }
+}

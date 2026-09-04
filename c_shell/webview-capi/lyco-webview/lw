@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""lyco-webview (lw) - 一键生成跨平台 WebView 项目
+用法:
+  lw new <project-name>     # 新项目
+  lw build                  # 构建当前平台
+  lw run                    # 运行
+  lw android                # 构建 Android APK
+"""
+import sys
+import os
+import shutil
+import subprocess
+import platform
+
+TEMPLATE_C = '''#include "webview.h"
+
+int main(void) {{
+    webview_t w = webview_create(0, NULL);
+    webview_set_title(w, "{title}");
+    webview_set_size(w, {width}, {height}, WEBVIEW_HINT_NONE);
+    webview_navigate(w, "{url}");
+    webview_run(w);
+    webview_destroy(w);
+    return 0;
+}}
+'''
+
+TEMPLATE_HTML = '''<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title}</title>
+<style>
+body{{font-family:system-ui,sans-serif;margin:0;padding:40px;background:#1a1a2e;color:#e0e0e8}}
+h1{{color:#e94560}}
+.card{{background:#16213e;border-radius:8px;padding:20px;margin:12px 0}}
+button{{background:#0f3460;color:#e0e0e8;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;margin:4px}}
+button:hover{{background:#e94560}}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<div class="card">WebView 跨平台应用</div>
+<div class="card">
+<button onclick="alert('Hello from WebView!')">点击测试</button>
+</div>
+<script>
+// JS 与原生通信示例
+window.test = () => console.log('WebView OK');
+</script>
+</body>
+</html>
+'''
+
+XMAKE_LUA = '''add_rules("mode.debug", "mode.release")
+
+target("{name}")
+    set_kind("binary")
+    add_files("src/main.c")
+    add_includedirs(".")
+    add_syslinks("user32", "shell32", "ole32", "oleaut32", "shlwapi", "version")
+    if is_mode("release") then
+        set_optimize("smallest")
+    end
+target_end()
+'''
+
+CMAKE = '''cmake_minimum_required(VERSION 3.10)
+project({name} C)
+set(CMAKE_C_STANDARD 11)
+add_executable({name} src/main.c)
+target_include_directories({name} PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}})
+target_link_libraries({name} PRIVATE
+    user32 shell32 ole32 oleaut32 shlwapi version)
+'''
+
+ANDROID_JAVA = '''package local.mc.console;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.webkit.WebSettings;
+
+public class MainActivity extends Activity {{
+    private WebView web;
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {{
+        super.onCreate(savedInstanceState);
+        String url = getIntent().getStringExtra("url");
+        if (url == null || url.isEmpty()) url = "{url}";
+        web = new WebView(this);
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        web.setWebViewClient(new WebViewClient());
+        setContentView(web);
+        web.loadUrl(url);
+    }}
+}}
+'''
+
+def new_project(name):
+    """创建新项目"""
+    if os.path.exists(name):
+        print(f"错误: 目录 {name} 已存在")
+        return False
+    
+    os.makedirs(f"{name}/src")
+    os.makedirs(f"{name}/android/java/local/mc/console")
+    
+    # 写 main.c
+    with open(f"{name}/src/main.c", "w") as f:
+        f.write(TEMPLATE_C.format(title=name, url="https://example.com", width=1100, height=760))
+    
+    # 写 index.html
+    with open(f"{name}/index.html", "w") as f:
+        f.write(TEMPLATE_HTML.format(title=name))
+    
+    # 写 xmake.lua
+    with open(f"{name}/xmake.lua", "w") as f:
+        f.write(XMAKE_LUA.format(name=name))
+    
+    # 写 CMakeLists.txt
+    with open(f"{name}/CMakeLists.txt", "w") as f:
+        f.write(CMAKE.format(name=name))
+    
+    # 写 Android 文件
+    with open(f"{name}/android/java/local/mc/console/MainActivity.java", "w") as f:
+        f.write(ANDROID_JAVA.format(url="https://example.com"))
+    
+    # 复制 webview.h
+    webview_h = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webview.h")
+    if os.path.exists(webview_h):
+        shutil.copy(webview_h, f"{name}/webview.h")
+    
+    print(f"✓ 项目 {name} 已创建")
+    print(f"  目录: {os.path.abspath(name)}")
+    print(f"  构建: cd {name} && xmake")
+    print(f"  运行: xmake run")
+    return True
+
+def build():
+    """构建当前平台"""
+    if os.path.exists("xmake.lua"):
+        subprocess.run(["xmake"], check=True)
+    elif os.path.exists("CMakeLists.txt"):
+        os.makedirs("build", exist_ok=True)
+        subprocess.run(["cmake", ".."], cwd="build", check=True)
+        subprocess.run(["cmake", "--build", "."], cwd="build", check=True)
+    else:
+        print("错误: 未找到 xmake.lua 或 CMakeLists.txt")
+
+def run_project():
+    """运行"""
+    if os.path.exists("xmake.lua"):
+        subprocess.run(["xmake", "run"], check=True)
+    elif os.path.exists("build"):
+        # 找 exe
+        for f in os.listdir("build"):
+            if f.endswith(".exe"):
+                subprocess.run([os.path.join("build", f)], check=True)
+                return
+        print("错误: 未找到可执行文件,先 build")
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return
+    
+    cmd = sys.argv[1]
+    
+    if cmd == "new":
+        if len(sys.argv) < 3:
+            print("用法: lw new <project-name>")
+            return
+        new_project(sys.argv[2])
+    elif cmd == "build":
+        build()
+    elif cmd == "run":
+        run_project()
+    elif cmd == "android":
+        print("Android 构建需要 Android SDK")
+        print("cd android && bash build_apk.sh")
+    else:
+        print(f"未知命令: {cmd}")
+        print(__doc__)
+
+if __name__ == "__main__":
+    main()

@@ -17,7 +17,7 @@ echo "[2/5] javac compile..."
   java/local/mc/console/MainActivity.java out/local/mc/console/R.java
 
 echo "[3/5] d8 dex..."
-"$BT/d8" --release --lib "$PLAT" --output out/dex out/classes/local/mc/console/*.class
+"$BT/d8.bat" --release --lib "$PLAT" --output out/dex out/classes/local/mc/console/*.class
 
 echo "[4/5] zip dex into apk..."
 ( cd out/dex && zip -q ../base.apk classes.dex )
@@ -29,7 +29,7 @@ if [ ! -f out/debug.keystore ]; then
     -alias androiddebugkey -keypass android \
     -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
 fi
-"$BT/apksigner" sign --ks out/debug.keystore --ks-pass pass:android \
+"$BT/apksigner.bat" sign --ks out/debug.keystore --ks-pass pass:android \
   --key-pass pass:android --out out/mc-console.apk out/aligned.apk
 
 echo "APK_OK: out/mc-console.apk"

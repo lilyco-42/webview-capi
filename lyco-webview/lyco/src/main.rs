@@ -360,18 +360,55 @@ fn main() {
     if args.len() < 2 {
         ensure_initialized();
         let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
+        let url = format!("http://localhost:{port}");
         println!("🌐 Lyco WebView Studio 启动中...");
-        println!("   打开浏览器访问: http://localhost:{port}");
+        println!("   打开浏览器访问: {url}");
         println!("   按 Ctrl+C 退出");
-        // 自动打开浏览器
-        let _ = Command::new("cmd")
-            .args(["/c", "start", &format!("http://localhost:{port}")])
-            .spawn();
-        let _ = Command::new("python")
-            .args(["-m", "http.server", &port])
-            .current_dir(web_dir())
-            .status();
-        return;
+
+        // 先启动 HTTP 服务(后台),再打开浏览器
+        let port_clone = port.clone();
+        let web_dir_clone = web_dir();
+        std::thread::spawn(move || {
+            let _ = Command::new("python")
+                .args(["-m", "http.server", &port_clone])
+                .current_dir(web_dir_clone)
+                .status();
+        });
+
+        // 等待服务启动
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // 打开浏览器
+        #[cfg(windows)]
+        {
+            // 尝试 Edge (Windows 10/11 自带)
+            let edge_paths = [
+                "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+                "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+            ];
+            let mut opened = false;
+            for path in &edge_paths {
+                if std::path::Path::new(path).exists() {
+                    if Command::new(path).arg(&url).spawn().is_ok() {
+                        opened = true;
+                        break;
+                    }
+                }
+            }
+            if !opened {
+                // 兜底: cmd /c start
+                let _ = Command::new("cmd").args(["/c", "start", "", &url]).spawn();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = Command::new("xdg-open").arg(&url).spawn();
+        }
+
+        // 阻塞主线程保持运行
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     let cmd = args[1].as_str();

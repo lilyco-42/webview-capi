@@ -1,0 +1,9 @@
+[package]
+name = "{NAME}"
+version = "0.1.0"
+
+[dependencies]
+webview-capi = "*"
+# 换用其他 webview UI (一行切换, lyco 自动配镜像源+系统库):
+#   lyco remove webview-capi && lyco add webui   (WebUI, 任意浏览器做前端)
+#   lyco add webview-mini                        (单头文件极简版)

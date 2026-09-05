@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "webview.h"
 int main(void) {
     webview_t w = webview_create(0, NULL);

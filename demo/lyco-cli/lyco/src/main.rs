@@ -17,6 +17,9 @@ fn commands_dir() -> PathBuf { data_dir().join("commands") }
 fn web_dir()      -> PathBuf { data_dir().join("web") }
 fn db_path()      -> PathBuf { data_dir().join("lyco.db") }
 
+// ── Lyco.toml (cargo 风格清单) ───────────────────────────────
+mod manifest;
+
 // ── 数据库 ───────────────────────────────────────────────────
 mod db {
     use super::*;
@@ -151,9 +154,11 @@ static TEMPLATE_PKG_JSON: &str = include_str!("../templates/package.json");
 static TEMPLATE_README: &str = include_str!("../templates/README.md");
 static TEMPLATE_GITIGNORE: &str = include_str!("../templates/.gitignore");
 static TEMPLATE_WEB_HTML: &str = include_str!("../templates/web.html");
+static TEMPLATE_LYCO_TOML: &str = include_str!("../templates/Lyco.toml");
 
 const ALL_TEMPLATES: &[(&str, &str)] = &[
     ("main.c", TEMPLATE_MAIN_C),
+    ("Lyco.toml", TEMPLATE_LYCO_TOML),
     ("xmake.lua", TEMPLATE_XMAKE),
     ("index.html", TEMPLATE_HTML),
     ("main.py", TEMPLATE_MAIN_PY),
@@ -168,24 +173,34 @@ const ALL_TEMPLATES: &[(&str, &str)] = &[
     ("README.md", TEMPLATE_README),
 ];
 
-fn release_templates() -> std::io::Result<()> {
+fn release_templates(force: bool) -> std::io::Result<()> {
     let dir = templates_dir();
     fs::create_dir_all(&dir)?;
     for (name, content) in ALL_TEMPLATES {
         let p = dir.join(name);
-        if !p.exists() { fs::write(&p, content)?; }
+        if force || !p.exists() { fs::write(&p, content)?; }
     }
     let web = web_dir();
     fs::create_dir_all(&web)?;
     let web_index = web.join("index.html");
-    if !web_index.exists() { fs::write(&web_index, TEMPLATE_WEB_HTML)?; }
+    if force || !web_index.exists() { fs::write(&web_index, TEMPLATE_WEB_HTML)?; }
     Ok(())
 }
 
 fn ensure_initialized() {
-    if !templates_dir().exists() {
-        println!("📦 首次运行,释放默认模板...");
-        release_templates().expect("释放失败");
+    // 版本戳: lyco 升级后自动重释放模板 (用户自定义会被覆盖, 提示备份)
+    let stamp = templates_dir().join(".version");
+    let cur = env!("CARGO_PKG_VERSION");
+    let stale = fs::read_to_string(&stamp).map(|v| v.trim() != cur).unwrap_or(true);
+    if !templates_dir().exists() || stale {
+        if templates_dir().exists() {
+            println!("📦 lyco v{cur}: 模板已更新并重新释放 (自定义修改请先备份 ~/.lyco/templates/)");
+        } else {
+            println!("📦 首次运行,释放默认模板...");
+        }
+        release_templates(templates_dir().exists()).expect("释放失败");
+        let _ = fs::create_dir_all(templates_dir());
+        let _ = fs::write(templates_dir().join(".version"), cur);
     }
 }
 
@@ -195,14 +210,10 @@ fn read_template_or_default(name: &str, default: &str) -> String {
 }
 
 fn subst(template: &str, vars: &[(&str, &str)]) -> String {
-    match tmpl::render(template, &vars.iter().cloned().collect()) {
-        Ok(r) => r,
-        Err(_) => { // 降级为简单替换
-            let mut r = template.to_string();
-            for (k, v) in vars { r = r.replace(&format!("{{{k}}}"), v); }
-            r
-        }
-    }
+    // 模板统一用 {K} 单花括号占位 (Tera 会把 {K} 当纯文本, 故直接替换)
+    let mut r = template.to_string();
+    for (k, v) in vars { r = r.replace(&format!("{{{k}}}"), v); }
+    r
 }
 
 fn write_file(path: &str, content: &str) {
@@ -240,7 +251,8 @@ fn cmd_new(name: &str, url: &str, lang: &str) {
         "c" => {
             let _ = fs::create_dir_all(format!("{name}/src"));
             write_file(&format!("{name}/src/main.c"), &subst(&read("main.c", TEMPLATE_MAIN_C), &vars));
-            write_file(&format!("{name}/xmake.lua"), &subst(&read("xmake.lua", TEMPLATE_XMAKE), &vars));
+            // cargo 化: Lyco.toml 是唯一配置, xmake.lua 由 lyco build 生成
+            write_file(&format!("{name}/Lyco.toml"), &subst(&read("Lyco.toml", TEMPLATE_LYCO_TOML), &vars));
         }
         "python" | "py" => {
             write_file(&format!("{name}/main.py"), &subst(&read("main.py", TEMPLATE_MAIN_PY), &vars));
@@ -280,7 +292,31 @@ fn cmd_new(name: &str, url: &str, lang: &str) {
     println!("  cd {name} && lyco run");
 }
 
-fn cmd_build() {
+// 解析 build/run 通用旗标: -r/--release, --target <plat>
+fn parse_build_flags(cmd_args: &[String]) -> (bool, Option<String>) {
+    let mut release = false;
+    let mut target = None;
+    let mut i = 0;
+    while i < cmd_args.len() {
+        match cmd_args[i].as_str() {
+            "-r" | "--release" => release = true,
+            "--target" => { i += 1; target = cmd_args.get(i).cloned(); }
+            _ => {}
+        }
+        i += 1;
+    }
+    (release, target)
+}
+
+fn cmd_build(cmd_args: &[String]) {
+    let (release, target) = parse_build_flags(cmd_args);
+    if Path::new(manifest::MANIFEST).exists() {
+        match manifest::build(release, target.as_deref()) {
+            Ok(()) => println!("✅ 完成"),
+            Err(e) => { eprintln!("❌ {e}"); std::process::exit(1); }
+        }
+        return;
+    }
     println!("🔨 构建...");
     if Path::new("xmake.lua").exists() { let _ = Command::new("xmake").status(); }
     else if Path::new("CMakeLists.txt").exists() {
@@ -291,7 +327,37 @@ fn cmd_build() {
     println!("✅ 完成");
 }
 
-fn cmd_run() { cmd_build(); println!("▶ 运行..."); let _ = Command::new("xmake").arg("run").status(); }
+fn cmd_run(cmd_args: &[String]) {
+    if Path::new(manifest::MANIFEST).exists() {
+        let (release, target) = parse_build_flags(cmd_args);
+        if let Err(e) = manifest::run(release, target.as_deref()) {
+            eprintln!("❌ {e}"); std::process::exit(1);
+        }
+        return;
+    }
+    cmd_build(&[]);
+    println!("▶ 运行...");
+    let _ = Command::new("xmake").arg("run").status();
+}
+
+fn cmd_add(dep: &str) {
+    if let Err(e) = manifest::add(dep) { eprintln!("❌ {e}"); std::process::exit(1); }
+    println!("  下一步: lyco build");
+}
+
+fn cmd_remove(dep: &str) {
+    if let Err(e) = manifest::remove(dep) { eprintln!("❌ {e}"); std::process::exit(1); }
+}
+
+fn cmd_clean() {
+    let dirs = ["build", ".xmake"];
+    for d in dirs {
+        if Path::new(d).exists() {
+            let _ = fs::remove_dir_all(d);
+            println!("🧹 已清除 {d}/");
+        }
+    }
+}
 
 fn cmd_web() {
     ensure_initialized();
@@ -330,22 +396,31 @@ fn cmd_list() {
 }
 
 fn print_help() {
-    print!(r#"lyco v1.0.0 - 跨平台 WebView 项目生成器 (WASM 插件架构)
+    print!(r#"lyco v1.1.0 - cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)
 
 用法: lyco <command> [args]
 
 命令:
-  new <name> <lang> [url]   新建项目
-  build                     构建
-  run                       构建 + 运行
-  web                       可视化 Web UI
-  reset                     重置
-  info                      配置信息
-  list                      列出命令
+  new <name> <lang> [url]       新建项目 (含 Lyco.toml)
+  add <dep>[@<ver>]             添加依赖, 例: lyco add webview-capi@1.0
+  remove <dep>                  移除依赖
+  build [-r] [--target <plat>]  构建 (-r = release; plat: windows/linux/macos/android/wasm)
+  run [-r] [--target <plat>]    构建 + 运行
+  clean                         清除构建产物
+  web                           可视化 Web UI
+  reset                         重置 ~/.lyco/
+  info / list                   配置信息 / 列出命令
+
+Lyco.toml (与 Cargo.toml 同风格):
+  [package]
+  name = "hello"
+  version = "0.1.0"
+
+  [dependencies]
+  webview-capi = "*"                      # WebView 窗口 (自动镜像源+系统库)
+  webui = {{ version = "*" }}              # WebUI, 任意浏览器做前端
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
-平台: windows, android, macos, linux, wasm
-
 插件: 将 .{} 放入 ~/.lyco/commands/ 扩展
 模板: 编辑 ~/.lyco/templates/ 定制
 "#,
@@ -432,8 +507,17 @@ fn main() {
             let url = cmd_args.get(2).map(|s| s.as_str()).unwrap_or("https://example.com");
             cmd_new(&cmd_args[0], url, &cmd_args[1]);
         }
-        "build" => cmd_build(),
-        "run"   => cmd_run(),
+        "build" => cmd_build(cmd_args),
+        "run"   => cmd_run(cmd_args),
+        "add" => {
+            if cmd_args.is_empty() { eprintln!("用法: lyco add <dep>[@<version>]   例: lyco add webview-capi@1.0"); std::process::exit(1); }
+            cmd_add(&cmd_args[0]);
+        }
+        "remove" => {
+            if cmd_args.is_empty() { eprintln!("用法: lyco remove <dep>"); std::process::exit(1); }
+            cmd_remove(&cmd_args[0]);
+        }
+        "clean" => cmd_clean(),
         "web"   => cmd_web(),
         "reset" => cmd_reset(),
         "info"  => cmd_info(),

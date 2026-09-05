@@ -1,38 +1,23 @@
-# Lyco WebView Studio
+# webview-capi
 
-> 一键生成跨平台 WebView 项目,支持 9 种编程语言
+> xmake 一键引入的 WebView2 C API,跨平台 WebView 应用开发
 
 [![Release](https://img.shields.io/github/v/release/lilyco-42/webview-capi)](https://github.com/lilyco-42/webview-capi/releases)
 [![CI](https://github.com/lilyco-42/webview-capi/workflows/Windows%20CI/badge.svg)](https://github.com/lilyco-42/webview-capi/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## 快速开始
+## 快速开始 (xmake 一键引入)
 
-```bash
-# 1. 下载安装
-# MSI/MSIX: https://github.com/lilyco-42/webview-capi/releases
-# 或直接下载 lyco.exe (单二进制, ~6MB)
-
-# 2. 创建项目
-lyco new my-app python
-cd my-app && lyco run
-```
-
-## 核心特性
-
-| 特性 | 说明 |
-|------|------|
-| **单二进制** | Rust 编译,一个 exe,无需安装 |
-| **9 种语言** | C/Python/TypeScript/Rust/Go/Java/Zig/C#/易语言 |
-| **5 平台** | Windows/macOS/Linux/Android/WASM |
-| **可视化** | `lyco web` 启动 Web 管理器 |
-| **插件架构** | 第三方 DLL/SO 完全替代内置命令 |
-| **持久化** | SQLite 记录项目/构建历史 |
-
-## xmake 一键引入
+### 1. 添加 xmake 镜像源
 
 ```lua
+-- xmake.lua
 add_repositories("lyco-mirror https://github.com/lilyco-42/xmake-mirror.git")
+```
+
+### 2. 引入包
+
+```lua
 add_requires("webview-capi")
 
 target("my-app")
@@ -43,72 +28,76 @@ target("my-app")
 target_end()
 ```
 
-## 命令参考
+### 3. 写代码
 
-| 命令 | 说明 |
-|------|------|
-| `lyco new <name> <lang> [url]` | 新建项目 |
-| `lyco build` | 构建当前项目 |
-| `lyco run` | 构建 + 运行 |
-| `lyco web` | 启动可视化 Web 管理器 |
-| `lyco info` | 查看配置状态 |
-| `lyco list` | 列出所有可用命令 |
-| `lyco reset` | 重置为默认模板 |
+```c
+// src/main.c
+#include "webview.h"
 
-## 支持的语言与平台
+int main(void) {
+    webview_t w = webview_create(0, NULL);
+    webview_set_title(w, "MC Console");
+    webview_set_size(w, 1100, 760, WEBVIEW_HINT_NONE);
+    webview_navigate(w, "http://192.168.10.165:8765");
+    webview_run(w);
+    webview_destroy(w);
+    return 0;
+}
+```
 
-**语言**: C · Python · TypeScript · Rust · Go · Java · Zig · C# · 易语言
-
-**平台**:
-- 🪟 Windows (WebView2)
-- 🍎 macOS (WKWebView)
-- 🐧 Linux (WebKitGTK)
-- 🤖 Android (WebView)
-- 🌐 WASM (纯前端 PWA)
-
-## 可视化 Web 管理器
+### 4. 编译运行
 
 ```bash
-lyco web
-# 打开 http://localhost:8080
+xmake
+xmake run
 ```
 
-功能:项目向导、构建日志、AI 辅助、环境自检、插件管理
+## 示例项目
 
-## 插件开发
+| 示例 | 说明 | 路径 |
+|------|------|------|
+| C + WebView2 | 最简 C 示例 | [demo/c-main](demo/c-main) |
+| Python + pywebview | Python 快速开发 | [demo/python-app](demo/python-app) |
+| Android WebView | APK 构建 | [demo/android](demo/android) |
+| Lyco CLI | Rust 项目生成器 | [demo/lyco-cli](demo/lyco-cli) |
 
-将动态库和可执行文件放入 `~/.lyco/commands/`:
+## 直接下载
 
-```
-~/.lyco/commands/
-├── new.dll      # 覆盖 new 命令
-├── new.exe      # 实际执行
-├── build.dll    # 覆盖 build 命令
-└── build.exe    # 实际执行
-```
+不想用 xmake? 直接下载单二进制 CLI:
 
-详见 [docs/PLUGIN_DEVELOPMENT.md](docs/PLUGIN_DEVELOPMENT.md)
+```bash
+# 下载 lyco.exe (6MB)
+# https://github.com/lilyco-42/webview-capi/releases
 
-## 项目结构
-
-```
-webview-capi/
-├── lyco-webview/lyco/    # CLI 源码 (Rust)
-├── web/                  # 可视化 Web UI
-├── android/              # Android WebView APK
-├── wix/                  # MSI 安装包配置
-├── msix/                 # MSIX 应用包配置
-├── docs/                 # 开发文档
-└── .github/workflows/    # CI/CD (Windows/Android/Rust)
+# 双击启动可视化界面
+# 或命令行:
+lyco new my-app python
+lyco build && lyco run
 ```
 
-## 技术路线图
+## 支持平台
 
-- **v1.0** ✅ 单二进制 + Tera 模板 + SQLite + 可视化 UI
-- **v2.0** ⬜ WASM 插件系统 + Tauri 2 桌面
-- **v3.0** ⬜ 本地 AI (Ollama) + 插件市场
+- 🪟 Windows (WebView2, Win10+)
+- 🍎 macOS (WKWebView)
+- 🐧 Linux (WebKitGTK)
+- 🤖 Android (WebView, API 24+)
+- 🌐 WASM (纯前端)
 
-详见 [docs/ROADMAP_V1.md](docs/ROADMAP_V1.md)
+## 支持语言
+
+C · Python · TypeScript · Rust · Go · Java · Zig · C# · 易语言
+
+## 包管理
+
+| 包名 | 说明 |
+|------|------|
+| `webview-capi` | C API DLL + 头文件 |
+| `webview-mini` | 单头文件最小封装 |
+
+## 文档
+
+- [插件开发](docs/PLUGIN_DEVELOPMENT.md)
+- [路线图](docs/ROADMAP_V1.md)
 
 ## License
 

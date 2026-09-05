@@ -8,3 +8,7 @@ out/
 *.pdb
 .DS_Store
 *.log
+
+# 允许预编译库入库 (lib/ 除外)
+!lib/*.dll
+!lib/*.lib

@@ -83,6 +83,27 @@ cl /O2 /MT main.c /link /SUBSYSTEM:WINDOWS lib\webview.lib \
 
 - `dist/webview-capi-v1.0.0-windows-x64.zip`
 
+## xmake 快速添加
+
+详细教程: [docs/XMAKE_TUTORIAL.md](docs/XMAKE_TUTORIAL.md)
+
+```lua
+add_repositories("lyco-mirror https://github.com/lilyco-42/xmake-mirror.git")
+add_requires("webview-capi")
+
+target("my-app")
+    set_kind("binary")
+    add_files("src/main.c")
+    add_packages("webview-capi")
+    add_syslinks("user32", "shell32", "ole32", "oleaut32", "shlwapi", "version")
+target_end()
+```
+
+```bash
+xmake
+xmake run
+```
+
 ## License
 
 MIT

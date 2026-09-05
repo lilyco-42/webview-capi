@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WASM WebView App</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#1a1a2e;color:#e0e0e8;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh}
+.container{text-align:center;padding:40px}
+h1{color:#e94560;margin-bottom:16px}
+.card{background:#16213e;border-radius:12px;padding:24px;margin:12px 0;max-width:400px}
+.btn{background:#0f3460;color:#e0e0e8;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:1rem;margin:4px}
+.btn:hover{background:#e94560}
+#log{margin-top:16px;font-family:monospace;font-size:0.85rem;color:#8b949e;height:120px;overflow-y:auto;background:#0a0e17;border-radius:8px;padding:12px;width:100%;max-width:400px;text-align:left}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>WASM WebView App</h1>
+<div class="card">
+<p>纯前端应用 — 无需后端</p>
+<button class="btn" onclick="runTest()">运行测试</button>
+<button class="btn" onclick="clearLog()">清除日志</button>
+</div>
+<div id="log"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

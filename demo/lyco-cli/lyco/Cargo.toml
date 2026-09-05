@@ -1,6 +1,6 @@
 [package]
 name = "lyco"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2024"
 description = "cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake + WASM 插件架构)"
 license = "MIT"

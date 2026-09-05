@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const MANIFEST: &str = "Lyco.toml";
@@ -24,6 +24,28 @@ fn known_dll(name: &str) -> Option<&'static str> {
     match name {
         "webview-capi" => Some("webview.dll"),
         _ => None,
+    }
+}
+
+// ── 注册表 (lyco search) ────────────────────────────────────
+pub const REGISTRY: &[(&str, &str)] = &[
+    ("webview-capi", "WebView2/WKWebView/WebKitGTK 极小 C API (预编译, lyco 维护)"),
+    ("webview-mini", "webview/webview 单头文件极简封装"),
+    ("webview",      "webview/webview 官方库"),
+    ("webui",        "WebUI — 用任意浏览器做 GUI"),
+];
+
+pub fn search(q: &str) {
+    let q = q.to_lowercase();
+    let mut found = 0;
+    for (n, d) in REGISTRY {
+        if n.contains(&q) || d.to_lowercase().contains(&q) {
+            println!("{n:<14} {d}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        println!("(注册表无匹配 — 任意 xmake 包仍可用: lyco add <xmake包名>)");
     }
 }
 
@@ -110,39 +132,53 @@ pub fn gen_xmake_lua(m: &Manifest) -> Result<(), String> {
         pkgs.push(d.clone());
     }
 
-    s.push_str(&format!("\ntarget(\"{name}\")\n    set_kind(\"binary\")\n"));
-    s.push_str(&format!("    add_files(\"{}\")\n", detect_src_pattern()));
-    s.push_str("    add_includedirs(\".\", \"src\")\n");
-    if !pkgs.is_empty() {
-        s.push_str(&format!("    add_packages({})\n", pkgs.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")));
-    }
+    // 依赖接线块 (主 target 与测试 target 共用)
     let syslinks: Vec<&str> = m.dependencies.keys()
         .filter_map(|d| known_syslinks(d))
         .flat_map(|sl| sl.iter().copied())
         .collect();
-    if !syslinks.is_empty() {
-        let uniq: Vec<&str> = {
-            let mut seen = Vec::new();
-            for s2 in syslinks { if !seen.contains(&s2) { seen.push(s2); } }
-            seen
-        };
-        s.push_str("    if is_plat(\"windows\") then\n");
-        s.push_str(&format!(
-            "        add_syslinks({})\n",
-            uniq.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", ")
-        ));
-        s.push_str("    end\n");
+    let mut uniq: Vec<&str> = vec![];
+    for s2 in &syslinks { if !uniq.contains(s2) { uniq.push(s2); } }
+    let mut deps_block = String::new();
+    if !pkgs.is_empty() {
+        deps_block.push_str(&format!("    add_packages({})\n",
+            pkgs.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")));
     }
-    s.push_str("    if is_mode(\"release\") then set_optimize(\"smallest\") end\n");
+    if !uniq.is_empty() {
+        deps_block.push_str("    if is_plat(\"windows\") then\n");
+        deps_block.push_str(&format!("        add_syslinks({})\n",
+            uniq.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>().join(", ")));
+        deps_block.push_str("    end\n");
+    }
     // 运行时 DLL 自动跟随 exe (mingw 不拷贝包的 bin, 这里兜底)
     for d in m.dependencies.keys() {
         if let Some(dll) = known_dll(d) {
-            s.push_str(&format!(
+            deps_block.push_str(&format!(
                 "    after_build(function (target)\n        local pkg = target:pkg(\"{d}\")\n        if pkg then\n            local dll = path.join(pkg:installdir(), \"bin\", \"{dll}\")\n            if os.isfile(dll) then os.cp(dll, target:targetdir()) end\n        end\n    end)\n"
             ));
         }
     }
-    s.push_str("target_end()\n");
+
+    s.push_str(&format!("\ntarget(\"{name}\")\n    set_kind(\"binary\")\n"));
+    s.push_str(&format!("    add_files(\"{}\")\n", detect_src_pattern()));
+    s.push_str("    add_includedirs(\".\", \"src\")\n");
+    s.push_str(&deps_block);
+    s.push_str("    if is_mode(\"release\") then set_optimize(\"smallest\") end\ntarget_end()\n");
+
+    // tests/*.c → 独立测试 target (lyco test 驱动, 不参与默认构建)
+    if let Ok(rd) = fs::read_dir("tests") {
+        for e in rd.filter_map(|e| e.ok()).collect::<Vec<_>>() {
+            let p = e.path();
+            if !matches!(p.extension().and_then(|x| x.to_str()), Some("c") | Some("cpp")) { continue; }
+            let stem = p.file_stem().unwrap().to_string_lossy();
+            let fname = p.file_name().unwrap().to_string_lossy();
+            s.push_str(&format!(
+                "\ntarget(\"test_{stem}\")\n    set_kind(\"binary\")\n    set_default(false)\n    add_files(\"tests/{fname}\")\n    add_includedirs(\".\", \"src\")\n"
+            ));
+            s.push_str(&deps_block);
+            s.push_str("target_end()\n");
+        }
+    }
     fs::write("xmake.lua", s).map_err(|e| e.to_string())
 }
 
@@ -192,33 +228,50 @@ fn find_mingw_sdk() -> Option<String> {
     None
 }
 
+/// xmake 配置的平台/工具链参数 (build 与 check 共用)
+fn platform_args(target_plat: Option<&str>) -> Result<Vec<String>, String> {
+    let mut v: Vec<String> = vec![];
+    let plat_arg = target_plat.map(plat).transpose()?;
+    if let Some(p) = plat_arg.as_deref() {
+        v.push("-p".into());
+        v.push(p.into());
+        if p == "mingw" {
+            if let Some(sdk) = find_mingw_sdk() {
+                v.push(format!("--sdk={sdk}")); // xmake 只认等号形式
+            }
+        }
+    } else if cfg!(windows) {
+        // Windows 宿主默认: 优先 MinGW (MSVC 常缺 Windows SDK)
+        if let Some(sdk) = find_mingw_sdk() {
+            println!("🔧 工具链: MinGW-w64 ({sdk})");
+            v.push("-p".into());
+            v.push("mingw".into());
+            v.push(format!("--sdk={sdk}"));
+        } else {
+            println!("🔧 工具链: MSVC (未发现 MinGW, 需要 Visual Studio C++ 工具集)");
+            v.push("-p".into());
+            v.push("windows".into());
+        }
+    }
+    Ok(v)
+}
+
+fn xmake_config(release: bool, target_plat: Option<&str>) -> Result<(), String> {
+    let mut conf = Command::new("xmake");
+    conf.args(["f", "-y", "-m", if release { "release" } else { "debug" }]);
+    for a in platform_args(target_plat)? {
+        conf.arg(a);
+    }
+    let st = conf.status().map_err(|_| "xmake 未安装 (scoop install xmake)")?;
+    if !st.success() { return Err("xmake 配置失败 (缺平台 SDK? 见上方输出)".into()); }
+    Ok(())
+}
+
 pub fn build(release: bool, target_plat: Option<&str>) -> Result<(), String> {
     let m = Manifest::load()?;
     gen_xmake_lua(&m)?;
     println!("⚙ 已从 {MANIFEST} 生成 xmake.lua ({} 个依赖)", m.dependencies.len());
-    let plat_arg = target_plat.map(plat).transpose()?;
-    // Windows 宿主默认: 优先 MinGW (MSVC 常缺 Windows SDK), 用户 --target 强制指定则尊重
-    let mut conf = Command::new("xmake");
-    conf.args(["f", "-y", "-m", if release { "release" } else { "debug" }]);
-    if let Some(p) = plat_arg.as_deref() {
-        conf.args(["-p", p]);
-        if p == "mingw" {
-            if let Some(sdk) = find_mingw_sdk() {
-                conf.arg(format!("--sdk={sdk}"));
-            }
-        }
-    } else if cfg!(windows) {
-        if let Some(sdk) = find_mingw_sdk() {
-            println!("🔧 工具链: MinGW-w64 ({sdk})");
-            conf.args(["-p", "mingw"]);
-            conf.arg(format!("--sdk={sdk}")); // xmake 只认等号形式
-        } else {
-            println!("🔧 工具链: MSVC (未发现 MinGW, 需要 Visual Studio C++ 工具集)");
-            conf.args(["-p", "windows"]);
-        }
-    }
-    let st = conf.status().map_err(|_| "xmake 未安装 (scoop install xmake)")?;
-    if !st.success() { return Err("xmake 配置失败 (缺平台 SDK? 见上方输出)".into()); }
+    xmake_config(release, target_plat)?;
     let st = Command::new("xmake").args(["-y"]).status()
         .map_err(|_| "xmake 未安装 (scoop install xmake)")?;
     if !st.success() { return Err("构建失败".into()); }
@@ -267,5 +320,143 @@ pub fn remove(dep: &str) -> Result<(), String> {
     if !removed { return Err(format!("{MANIFEST} 中没有依赖 {dep}")); }
     fs::write(MANIFEST, doc.to_string()).map_err(|e| e.to_string())?;
     println!("✅ 已移除 {dep}");
+    Ok(())
+}
+
+// ── check: 语法检查 (不产出目标文件) ────────────────────────
+fn collect_includes(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 5 { return; }
+    let rd = match fs::read_dir(dir) { Ok(r) => r, Err(_) => return };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().map(|n| n == "include").unwrap_or(false) {
+                out.push(p.clone());
+            }
+            collect_includes(&p, depth + 1, out);
+        }
+    }
+}
+
+fn collect_src(dir: &Path, out: &mut Vec<PathBuf>) {
+    let rd = match fs::read_dir(dir) { Ok(r) => r, Err(_) => return };
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            collect_src(&p, out);
+        } else if matches!(p.extension().and_then(|x| x.to_str()), Some("c") | Some("cpp")) {
+            out.push(p);
+        }
+    }
+}
+
+pub fn check() -> Result<(), String> {
+    let m = Manifest::load()?;
+    gen_xmake_lua(&m)?;
+    xmake_config(false, None)?; // 配置+装包, 使包 include 目录就绪
+
+    let mut incs: Vec<PathBuf> = vec![PathBuf::from("."), PathBuf::from("src")];
+    if let Ok(base) = env::var("LOCALAPPDATA") {
+        collect_includes(&PathBuf::from(base).join(".xmake/packages"), 0, &mut incs);
+    }
+    let gcc = find_mingw_sdk().map(|s| format!("{s}\\bin\\gcc.exe"));
+    let prog = match gcc {
+        Some(g) if Path::new(&g).exists() => g,
+        _ => return Err("check 需要编译器: scoop install gcc (或安装完整 MSVC)".into()),
+    };
+
+    let mut files: Vec<PathBuf> = vec![];
+    collect_src(Path::new("src"), &mut files);
+    if files.is_empty() { return Err("src/ 下没有源文件".into()); }
+
+    let mut bad = 0;
+    for f in &files {
+        let mut c = Command::new(&prog);
+        c.arg("-fsyntax-only");
+        for i in &incs { c.arg(format!("-I{}", i.display())); }
+        c.arg(f);
+        let out = c.output();
+        let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+        println!("{} {}", if ok { "✔" } else { "✘" }, f.display());
+        if !ok {
+            if let Ok(o) = out {
+                let err = String::from_utf8_lossy(&o.stderr);
+                for line in err.lines().take(6) { println!("    {line}"); }
+            }
+            bad += 1;
+        }
+    }
+    if bad > 0 { return Err(format!("{bad} 个文件未通过语法检查")); }
+    println!("✅ 语法检查通过 ({} 个文件)", files.len());
+    Ok(())
+}
+
+// ── test: tests/*.c → 每个文件一个测试 target 并逐个运行 ────
+pub fn test() -> Result<(), String> {
+    let m = Manifest::load()?;
+    build(false, None)?; // gen_xmake_lua 会为 tests/ 生成 test_* target
+
+    let rd = fs::read_dir("tests").map_err(|_| "没有 tests/ 目录 (放 tests/xxx.c 后重试)".to_string())?;
+    let mut ran = 0;
+    let mut failed = 0;
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if !matches!(p.extension().and_then(|x| x.to_str()), Some("c") | Some("cpp")) { continue; }
+        let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+        println!("▶ 运行测试 {stem} ...");
+        let st = Command::new("xmake").args(["run", &format!("test_{stem}")]).status();
+        ran += 1;
+        match st {
+            Ok(s) if s.success() => println!("✔ {stem}"),
+            _ => { println!("✘ {stem}"); failed += 1; }
+        }
+    }
+    if ran == 0 { return Err("tests/ 下没有 .c/.cpp 测试文件".into()); }
+    if failed > 0 { return Err(format!("{failed}/{ran} 个测试失败")); }
+    println!("✅ {ran} 个测试全部通过");
+    Ok(())
+}
+
+// ── install / uninstall: 构建并安装到 ~/.lyco/bin ───────────
+fn find_built_exe(dir: &Path, name: &str) -> Option<PathBuf> {
+    let rd = fs::read_dir(dir).ok()?;
+    for e in rd.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find_built_exe(&p, name) { return Some(f); }
+        } else if p.file_name().map(|n| n.to_string_lossy() == format!("{name}.exe")).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+pub fn install() -> Result<(), String> {
+    build(true, None)?;
+    let m = Manifest::load()?;
+    let name = m.project_name();
+    let exe = find_built_exe(Path::new("build"), &name)
+        .ok_or("构建产物未找到 (build/**/<name>.exe)")?;
+    let dest_dir = super::data_dir().join("bin");
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(format!("{name}.exe"));
+    fs::copy(&exe, &dest).map_err(|e| e.to_string())?;
+    println!("✅ 已安装 {}", dest.display());
+    println!("   提示: 把 {} 加入 PATH 后可全局调用", dest_dir.display());
+    Ok(())
+}
+
+pub fn uninstall(name: Option<&str>) -> Result<(), String> {
+    let n = match name {
+        Some(n) => n.to_string(),
+        None => Manifest::load()?.project_name(),
+    };
+    let p = super::data_dir().join("bin").join(format!("{n}.exe"));
+    if p.exists() {
+        fs::remove_file(&p).map_err(|e| e.to_string())?;
+        println!("✅ 已卸载 {}", p.display());
+    } else {
+        println!("ℹ 未安装: {}", p.display());
+    }
     Ok(())
 }

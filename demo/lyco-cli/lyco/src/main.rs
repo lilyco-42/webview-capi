@@ -359,6 +359,43 @@ fn cmd_clean() {
     }
 }
 
+// cargo init: 在现有目录生成清单 (不覆盖已有文件)
+fn cmd_init(name: Option<&str>) {
+    if Path::new(manifest::MANIFEST).exists() { eprintln!("Lyco.toml 已存在"); std::process::exit(1); }
+    ensure_initialized();
+    let dir_name = env::current_dir().ok()
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "app".into());
+    let name = name.unwrap_or(&dir_name);
+    let vars = [("NAME", name), ("URL", "https://example.com"), ("DEBUG", "false"), ("YEAR", "2026")];
+    write_file(manifest::MANIFEST, &subst(&read_template_or_default("Lyco.toml", TEMPLATE_LYCO_TOML), &vars));
+    if !Path::new("src").exists() {
+        let _ = fs::create_dir_all("src");
+        write_file("src/main.c", &subst(&read_template_or_default("main.c", TEMPLATE_MAIN_C), &vars));
+    }
+    if !Path::new("index.html").exists() {
+        write_file("index.html", &subst(&read_template_or_default("index.html", TEMPLATE_HTML), &vars));
+    }
+    println!("✅ 已在当前目录初始化 {name}");
+    println!("  lyco add webview-capi   # 一行添加 webview UI");
+    println!("  lyco run");
+}
+
+fn cmd_doc() {
+    let ok = Command::new("doxygen").arg("--version").output()
+        .map(|o| o.status.success()).unwrap_or(false);
+    if !ok { eprintln!("doc 需要 doxygen (scoop install doxygen)"); std::process::exit(1); }
+    if !Path::new("Doxyfile").exists() {
+        let name = manifest::Manifest::load().map(|m| m.project_name()).unwrap_or_else(|_| "app".into());
+        fs::write("Doxyfile", format!(
+            "PROJECT_NAME = \"{name}\"\nINPUT = src\nRECURSIVE = YES\nGENERATE_HTML = YES\nGENERATE_LATEX = NO\nOUTPUT_DIRECTORY = docs/api\nQUIET = YES\n"
+        )).expect("写 Doxyfile 失败");
+        println!("📄 已生成默认 Doxyfile (可自行修改)");
+    }
+    let _ = Command::new("doxygen").arg("Doxyfile").status();
+    println!("✅ 文档输出: docs/api/html/index.html");
+}
+
 fn cmd_web() {
     ensure_initialized();
     let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
@@ -382,7 +419,7 @@ fn cmd_info() {
 }
 
 fn cmd_list() {
-    println!("内置命令: new build run web reset info list");
+    println!("内置命令: new init add remove build check run test doc search update install uninstall clean web reset info list bench publish");
     let dir = commands_dir();
     if dir.exists() {
         let ext = if cfg!(windows) { "dll" } else { "so" };
@@ -396,20 +433,29 @@ fn cmd_list() {
 }
 
 fn print_help() {
-    print!(r#"lyco v1.1.0 - cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)
+    print!(r#"lyco v1.2.0 - cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)
 
-用法: lyco <command> [args]
+用法: lyco <command> [args]        (b/c/r/t/d 为 build/check/run/test/doc 别名)
 
 命令:
   new <name> <lang> [url]       新建项目 (含 Lyco.toml)
+  init [name]                   在现有目录初始化清单
   add <dep>[@<ver>]             添加依赖, 例: lyco add webview-capi@1.0
-  remove <dep>                  移除依赖
-  build [-r] [--target <plat>]  构建 (-r = release; plat: windows/linux/macos/android/wasm)
+  remove <dep>                  移除依赖 (保留注释与格式)
+  build [-r] [--target <plat>]  构建 (-r = release; 默认 debug)
+  check                         语法检查 (不产出目标文件)
   run [-r] [--target <plat>]    构建 + 运行
+  test                          运行 tests/*.c (每个文件一个测试)
+  doc                           生成文档 (需 doxygen)
+  search [关键词]               搜索依赖注册表
+  update                        更新包仓库 (xmake repo -u)
+  install / uninstall [name]    构建并安装到 ~/.lyco/bin / 卸载
   clean                         清除构建产物
   web                           可视化 Web UI
   reset                         重置 ~/.lyco/
   info / list                   配置信息 / 列出命令
+
+平台 (--target): windows / mingw / linux / macos / android / ios / wasm
 
 Lyco.toml (与 Cargo.toml 同风格):
   [package]
@@ -422,7 +468,7 @@ Lyco.toml (与 Cargo.toml 同风格):
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 将 .{} 放入 ~/.lyco/commands/ 扩展
-模板: 编辑 ~/.lyco/templates/ 定制
+模板: 编辑 ~/.lyco/templates/ 定制 (随 lyco 升级自动更新, 升级前请备份)
 "#,
         if cfg!(windows) { "dll" } else { "so" }
     );
@@ -507,8 +553,27 @@ fn main() {
             let url = cmd_args.get(2).map(|s| s.as_str()).unwrap_or("https://example.com");
             cmd_new(&cmd_args[0], url, &cmd_args[1]);
         }
-        "build" => cmd_build(cmd_args),
-        "run"   => cmd_run(cmd_args),
+        "build" | "b" => cmd_build(cmd_args),
+        "run"   | "r" => cmd_run(cmd_args),
+        "check" | "c" => if let Err(e) = manifest::check() { eprintln!("❌ {e}"); std::process::exit(1); },
+        "test"  | "t" => if let Err(e) = manifest::test() { eprintln!("❌ {e}"); std::process::exit(1); },
+        "doc"   | "d" => cmd_doc(),
+        "init"  => cmd_init(cmd_args.first().map(|s| s.as_str())),
+        "update" => {
+            println!("⬆ 更新包仓库 (xmake repo -u) ...");
+            let st = Command::new("xmake").args(["repo", "-u"]).status();
+            if st.map(|s| s.success()).unwrap_or(false) { println!("✅ 已更新"); }
+        },
+        "search" => manifest::search(cmd_args.first().map(|s| s.as_str()).unwrap_or("")),
+        "install" => if let Err(e) = manifest::install() { eprintln!("❌ {e}"); std::process::exit(1); },
+        "uninstall" => if let Err(e) = manifest::uninstall(cmd_args.first().map(|s| s.as_str())) { eprintln!("❌ {e}"); std::process::exit(1); },
+        "bench" => {
+            println!("ℹ cargo bench 无直接对应。建议: lyco build -r 后对产物压测;");
+            println!("  或把基准程序放 tests/, 用 lyco test 运行。");
+        }
+        "publish" => {
+            println!("ℹ 未实现 (roadmap): git tag v<Lyco.toml version> + gh release 上传构建产物");
+        }
         "add" => {
             if cmd_args.is_empty() { eprintln!("用法: lyco add <dep>[@<version>]   例: lyco add webview-capi@1.0"); std::process::exit(1); }
             cmd_add(&cmd_args[0]);

@@ -22,7 +22,17 @@ lyco run                # 构建并弹出 WebView 窗口
 | `lyco build [-r]` | `cargo build [--release]` | 构建 (默认 debug) |
 | `lyco build --target <plat>` | `cargo zigbuild --target` | 交叉构建 |
 | `lyco run [-r]` | `cargo run` | 构建 + 运行 |
+| `lyco check` | `cargo check` | 语法检查 (不产出目标文件) |
+| `lyco test` | `cargo test` | 运行 tests/*.c (每个文件一个测试) |
+| `lyco doc` | `cargo doc` | 生成文档 (需 doxygen) |
+| `lyco init` | `cargo init` | 在现有目录初始化清单 |
+| `lyco search [词]` | `cargo search` | 搜索依赖注册表 |
+| `lyco update` | `cargo update` | 更新包仓库 |
+| `lyco install` / `uninstall` | `cargo install` / `uninstall` | 安装到 ~/.lyco/bin / 卸载 |
 | `lyco clean` | `cargo clean` | 清除构建产物 |
+
+别名: `b`/`c`/`r`/`t`/`d` = build/check/run/test/doc。
+未映射: `bench`(提示用 -r 产物压测)、`publish`(roadmap: tag + gh release)。
 
 平台 (`--target`): windows / mingw / linux / macos / android / ios / wasm
 

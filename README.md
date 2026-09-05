@@ -56,10 +56,10 @@ xmake run
 
 | 示例 | 说明 | 路径 |
 |------|------|------|
-| C + WebView2 | 最简 C 示例 | [demo/c-main](demo/c-main) |
-| Python + pywebview | Python 快速开发 | [demo/python-app](demo/python-app) |
-| Android WebView | APK 构建 | [demo/android](demo/android) |
-| Lyco CLI | Rust 项目生成器 | [demo/lyco-cli](demo/lyco-cli) |
+| c-main | C + WebView2 示例 | [demo/c-main](demo/c-main) |
+| python-app | Python + pywebview 示例 | [demo/python-app](demo/python-app) |
+| android | Android WebView APK | [demo/android](demo/android) |
+| lyco-cli | Rust CLI 工具源码 | [demo/lyco-cli](demo/lyco-cli) |
 
 ## 直接下载
 

@@ -1,6 +1,6 @@
-# C + WebView2 示例
+# demo/c-main
 
-最简 C 语言 WebView2 应用。
+C 语言 + WebView2 最简示例。
 
 ## 构建
 

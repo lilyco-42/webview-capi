@@ -1,4 +1,6 @@
-# Python + pywebview 示例
+# demo/python-app
+
+Python + pywebview 示例。
 
 ## 运行
 

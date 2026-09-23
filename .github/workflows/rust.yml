@@ -1,28 +1,63 @@
 name: Rust CI
 
+# 修的是 webview-capi 里那个「cargo build 在仓库根目录跑」的问题：
+# 根目录没有 Cargo.toml，原来每次都挂在
+#   error: could not find `Cargo.toml` in ... or any parent directory
+# 真正要构建的是 demo/lyco-cli/lyco。
+
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
 
 jobs:
-  build-rust:
+  lyco-cli:
+    name: lyco CLI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: demo/lyco-cli/lyco
     steps:
       - uses: actions/checkout@v4
-      
+
+      # actions-rs/toolchain@v1 已于 2024 归档且只针对 Node 20，换成官方维护的
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          toolchain: stable
-          override: true
-      
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            demo/lyco-cli/lyco/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('demo/lyco-cli/lyco/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
       - name: Build
-        run: cargo build --release
-      
+        run: cargo build --release --locked
+
       - name: Test
-        run: cargo test
+        run: cargo test --release --locked
+
+      # lyco --help 会走 _ => 分支 print_help() 后 exit(1)，不能拿它当冒烟测试；
+      # list / info 才是正常返回 0 的自省命令。
+      - name: Smoke test
+        run: |
+          cargo run --release --locked -- list
+          cargo run --release --locked -- info
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyco-${{ runner.os }}
+          path: |
+            demo/lyco-cli/lyco/target/release/lyco
+            demo/lyco-cli/lyco/target/release/lyco.exe
+          if-no-files-found: error

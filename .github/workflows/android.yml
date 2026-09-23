@@ -1,5 +1,11 @@
 name: Android CI
 
+# 原 workflow 有两处必然失败：
+#   1) `cd android` / `path: android/out/*.apk` —— 目录实际是 demo/android
+#   2) 用了 android-actions/setup-android@v3，它只针对 Node 20，在当前 runner 上
+#      直接在 setup 阶段挂掉：sdkmanager failed with exit code 1
+# 现在改用 runner 预装的 SDK，直接调 sdkmanager 装所需组件。
+
 on:
   push:
     branches: [main]
@@ -8,27 +14,53 @@ on:
     branches: [main]
 
 jobs:
-  build-android:
+  build-apk:
+    name: 构建 APK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      
+
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      
-      - name: Build APK
+
+      - name: 安装 Android SDK 组件
+        shell: bash
         run: |
-          cd android
-          bash build_apk.sh
-      
-      - name: Upload APK
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          SDKMGR="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMGR" ]; then
+            SDKMGR="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)"
+          fi
+          test -n "$SDKMGR"
+          echo "sdkmanager=$SDKMGR"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "platforms;android-36" "build-tools;36.0.0"
+          echo "--- 已装 build-tools ---"; ls "$SDK/build-tools"
+          echo "--- 已装 platforms ---";   ls "$SDK/platforms"
+
+      - name: 构建 APK
+        shell: bash
+        working-directory: demo/android
+        run: bash build_apk.sh
+
+      - name: 校验 APK
+        shell: bash
+        working-directory: demo/android
+        run: |
+          set -euo pipefail
+          APK=out/mc-console.apk
+          test -f "$APK"
+          ls -la "$APK"
+          unzip -l "$APK"
+
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
           name: mc-console-android
-          path: android/out/*.apk
+          path: demo/android/out/*.apk
+          if-no-files-found: error

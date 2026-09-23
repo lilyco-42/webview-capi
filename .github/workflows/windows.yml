@@ -1,5 +1,16 @@
 name: Windows CI
 
+# 原 workflow 是整体从另一个项目（Rust 桌面应用 Lyco WebView Studio）搬过来的，
+# 从来没跑通过。逐条实证：
+#   * working-directory: lyco-webview/lyco  —— 目录不存在，真实路径 demo/lyco-cli/lyco
+#     报错：An error occurred trying to start process 'pwsh.EXE' with working directory
+#           'D:\a\webview-capi\webview-capi\lyco-webview/lyco'. The directory name is invalid.
+#   * wix\installer.wxs —— 该文件本身 XML 语法就是坏的
+#     （`<WixVariable Id="WixUILicenseRtf" License.rtf" />` 缺 Value= 且引号错位），
+#     且 Source= 引用的 LICENSE / 根目录 webview.h / webview.dll 在仓库里都不存在。
+#   * msix —— msix/ 下只有 AppxManifest.xml，清单里要求的 assets\*.png 全部缺失。
+# 所以这个 job 改成构建仓库真正有的东西：用 MinGW + xmake 构建 demo/c-main。
+
 on:
   push:
     branches: [main]
@@ -8,63 +19,82 @@ on:
     branches: [main]
 
 jobs:
-  build-windows:
+  c-demo:
+    name: C demo (MinGW + xmake)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Setup MSVC
-        uses: microsoft/setup-msbuild@v2
+      - name: 装 MinGW 工具链
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+
+      - name: 把 MinGW 加进 PATH
+        shell: pwsh
+        run: |
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          C:\msys64\mingw64\bin\gcc.exe --version
+
+      - name: 装 xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+          package-cache: true
+
+      - name: 构建 demo/c-main
+        shell: pwsh
+        working-directory: demo/c-main
+        run: |
+          xmake f -y --mingw=C:\msys64\mingw64
+          xmake -y
+
+      - name: 校验产物（存在 + PE 子系统是 GUI）
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter c-main.exe demo/c-main/build |
+                 Select-Object -First 1
+          if (-not $exe) { throw "没找到 c-main.exe" }
+          $b   = [IO.File]::ReadAllBytes($exe.FullName)
+          $pe  = [BitConverter]::ToInt32($b, 0x3C)
+          $sub = [BitConverter]::ToUInt16($b, $pe + 24 + 68)
+          "产物: $($exe.FullName)"
+          "大小: $($b.Length) B"
+          "子系统: $sub (2=GUI, 3=console)"
+          if ($sub -ne 2) { throw "子系统应为 2(GUI)，实际 $sub —— 检查 xmake.lua 里的 -mwindows" }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-main-mingw
+          path: demo/c-main/build/**/c-main.exe
+          if-no-files-found: error
+
+  lyco-cli-windows:
+    name: lyco CLI (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: demo/lyco-cli/lyco
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --locked
 
-      - name: Build lyco CLI
-        run: cargo build --release
-        working-directory: lyco-webview/lyco
-
-      - name: Run tests
-        run: cargo test --release
-        working-directory: lyco-webview/lyco
-
-      - name: Build MSI (WiX)
+      - name: Smoke test
         run: |
-          candle.exe wix\installer.wxs -o wix\installer.wixobj
-          light.exe wix\installer.wixobj -o wix\lyco.msi -ext WixUIExtension
-        shell: cmd
+          cargo run --release --locked -- list
+          cargo run --release --locked -- info
 
-      - name: Build MSIX
-        run: |
-          makeappx pack /d msix /p wix\lyco.msix
-          signtool sign /fd SHA256 /a wix\lyco.msix
-        shell: cmd
-        continue-on-error: true
-
-      - name: Upload MSI
-        uses: actions/upload-artifact@v4
-        with:
-          name: lyco-msi
-          path: wix/*.msi
-
-      - name: Upload MSIX
-        uses: actions/upload-artifact@v4
-        with:
-          name: lyco-msix
-          path: wix/*.msix
-
-      - name: Upload lyco.exe
+      - name: 上传 lyco.exe
         uses: actions/upload-artifact@v4
         with:
           name: lyco-windows
-          path: lyco-webview/lyco/target/release/lyco.exe
+          path: demo/lyco-cli/lyco/target/release/lyco.exe
+          if-no-files-found: error

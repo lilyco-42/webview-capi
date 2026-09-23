@@ -13,9 +13,22 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <UIRef Id="WixUI_InstallDir" />
     <UIRef Id="WixUI_ErrorProgressText" />
-    <WixVariable Id="WixUILicenseRtf" License.rtf" />
-    <WixVariable Id="WixUIBannerBanner.bmp" />
-    <WixVariable Id="WixUIDialogBialog.bmp" />
+    <!--
+      修复：原来这三行是无效 XML，candle.exe 直接解析失败。
+        <WixVariable Id="WixUILicenseRtf" License.rtf" />      <- 缺 Value= 且引号错位
+        <WixVariable Id="WixUIBannerBanner.bmp" />             <- 属性名被文件名污染
+        <WixVariable Id="WixUIDialogBialog.bmp" />             <- 同上
+      WixUIExtension 里正确的变量名是 WixUIBannerBmp / WixUIDialogBmp。
+
+      已知未完成项（本文件目前仍不能产出 MSI，故未接入 CI）：
+        * WixUI_InstallDir 要求 License.rtf 存在，仓库里没有该文件
+        * ProductComponents 里 Source="LICENSE" 指向不存在的 LICENSE（已删掉该组件）
+        * banner.bmp / dialog.bmp 也未随仓提供，light 会报缺文件
+      要真正出 MSI，需先补齐上述资源；届时在 windows.yml 里加回 candle/light 步骤。
+    -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
   </Product>
 
   <Fragment>
@@ -30,15 +43,19 @@
   </Fragment>
 
   <Fragment>
+    <!--
+      Source= 全部改为仓库里真实存在的路径（相对仓库根目录，对应
+      `candle.exe wix\installer.wxs` 在根目录执行）。原来的写法全部指向不存在的文件：
+        target\release\lyco.exe  ->  实际在 demo\lyco-cli\lyco\target\release\lyco.exe
+        webview.h / .dll / .lib  ->  实际都在 lib\ 下
+        LICENSE                  ->  仓库里根本没有 LICENSE 文件，该组件已删除
+    -->
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="lycoEXE" Guid="87654321-4321-4321-4321-210987654321">
-        <File Id="lyco.exe" Source="target\release\lyco.exe" KeyPath="yes" />
+        <File Id="lyco.exe" Source="demo\lyco-cli\lyco\target\release\lyco.exe" KeyPath="yes" />
       </Component>
       <Component Id="webviewH" Guid="87654321-4321-4321-4321-210987654322">
-        <File Id="webview.h" Source="webview.h" KeyPath="yes" />
-      </Component>
-      <Component Id="LICENSE" Guid="87654321-4321-4321-4321-210987654323">
-        <File Id="LICENSE.txt" Source="LICENSE" KeyPath="yes" />
+        <File Id="webview.h" Source="lib\webview.h" KeyPath="yes" />
       </Component>
       <Component Id="PATH" Guid="87654321-4321-4321-4321-210987654324">
         <Environment Id="PATHLYCO" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="yes" />
@@ -51,10 +68,10 @@
     </ComponentGroup>
     <ComponentGroup Id="WebViewDLLComponents" Directory="INSTALLFOLDER">
       <Component Id="webviewDLL" Guid="76543210-4321-4321-4321-210987654321">
-        <File Id="webview.dll" Source="webview.dll" KeyPath="yes" />
+        <File Id="webview.dll" Source="lib\webview.dll" KeyPath="yes" />
       </Component>
       <Component Id="webviewLIB" Guid="76543210-4321-4321-4321-210987654322">
-        <File Id="webview.lib" Source="webview.lib" KeyPath="yes" />
+        <File Id="webview.lib" Source="lib\webview.lib" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

@@ -1,5 +1,16 @@
 name: Cross-Platform CI
 
+# 原来三个 job 全部 working-directory: lyco-webview/lyco —— 这个目录不存在
+# （真实路径是 demo/lyco-cli/lyco），所以 macos 直接
+#   An error occurred trying to start process '/bin/bash' with working directory
+#   '.../lyco-webview/lyco'. No such file or directory
+# 而 linux 更早一步就死在 `apt-get install libwebkit2gtk-4.0-dev`（exit 100）：
+#   Ubuntu 24.04 里这个包已不存在，且 lyco CLI 的依赖是
+#   tera/rusqlite/serde/once_cell/toml/toml_edit —— 没有任何 GUI 依赖，压根不需要 webkit。
+#
+# 本 job 做的是「端到端」：真跑一次 lyco new 并校验产物。
+# 模板是编译期内嵌的（ALL_TEMPLATES），所以这一步完全离线，不依赖网络。
+
 on:
   push:
     branches: [main]
@@ -8,50 +19,42 @@ on:
     branches: [main]
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  lyco-e2e:
+    name: lyco 端到端 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.0-dev
-      - name: Build
-        run: cargo build --release
-        working-directory: lyco-webview/lyco
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: lyco-linux
-          path: lyco-webview/lyco/target/release/lyco
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release
-        working-directory: lyco-webview/lyco
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: lyco-macos
-          path: lyco-webview/lyco/target/release/lyco
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-  build-android:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Build APK
-        run: cd demo/android && bash build_apk.sh
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-apk
-          path: demo/android/out/*.apk
+      - name: 构建 lyco
+        working-directory: demo/lyco-cli/lyco
+        run: cargo build --release --locked
+
+      - name: 生成项目并校验产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          test -x "$LYCO"
+          TMP="$(mktemp -d)"
+          cd "$TMP"
+          "$LYCO" new hello c
+          test -f hello/src/main.c
+          test -f hello/Lyco.toml
+          test -f hello/index.html
+          grep -q 'name' hello/Lyco.toml
+          echo "--- 生成的文件 ---"
+          find hello -type f | sort
+
+      - name: 校验命令行自省
+        shell: bash
+        run: |
+          set -euo pipefail
+          demo/lyco-cli/lyco/target/release/lyco list
+          demo/lyco-cli/lyco/target/release/lyco info

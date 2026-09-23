@@ -19,6 +19,39 @@ on:
     branches: [main]
 
 jobs:
+  # 中文注释/输出在这个仓里很常见，但 shell 里变量紧跟中文时（例如 echo 里写完
+  # 变量名、紧接一个全角括号），macOS 自带的 bash 3.2 会把多字节字符的字节并进
+  # 变量名，在 set -u 下报 `line N: rc<乱码>: unbound variable`；
+  # ubuntu 的 bash 5 不复现 —— 所以这类 bug **只在 macOS 炸，评审时也看不出来**。
+  # 实测踩过一次（见 §19），统一写成 ${VAR} 即可。
+  workflow-shell-lint:
+    name: 工作流 shell 片段可移植性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只扫会被执行的代码行；注释行不参与执行，跳过。
+      - name: 校验没有「$VAR 紧跟非 ASCII」的写法
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS= read -r f; do
+            hits="$(sed 's/\r$//' "$f" \
+              | LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' \
+              | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+            if [ -n "$hits" ]; then
+              echo "❌ $f: 变量名后面紧跟了非 ASCII 字符"
+              echo "$hits" | sed 's/^/    /'
+              bad=1
+            fi
+          done < <(find .github/workflows -name '*.yml'; find . -name '*.sh' -not -path '*/target/*' -not -path './.git/*')
+          if [ "$bad" -ne 0 ]; then
+            echo "  修法：把 \$VAR 写成 \${VAR}"
+            exit 1
+          fi
+          echo "✅ 没有「变量紧跟非 ASCII」的写法"
+
   lyco-e2e:
     name: lyco 端到端 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -109,7 +142,7 @@ jobs:
           rc=$?
           set -e
 
-          echo "--- 输出（退出码 $rc） ---"
+          echo "--- 输出（退出码 ${rc}） ---"
           cat "$OUT/log"
           test "$rc" -ne 0 || { echo "❌ 找不到 python 时不该返回 0"; exit 1; }
           grep -q "未找到 python" "$OUT/log" || { echo "❌ 缺少明确提示"; exit 1; }

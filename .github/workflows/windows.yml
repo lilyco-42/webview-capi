@@ -26,17 +26,26 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 装 MinGW 工具链
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: false
           install: mingw-w64-x86_64-gcc
 
+      # 不要写死 C:\msys64 —— 新版 runner 镜像（windows-2025-vs2026）没有预装 MSYS2，
+      # setup-msys2 会现场下载并解压到自己的临时目录（实测 D:\a\_temp\setup-msys2），
+      # 于是 C:\msys64\mingw64\bin\gcc.exe 不存在。用 action 的 msys2-location 输出。
       - name: 把 MinGW 加进 PATH
         shell: pwsh
         run: |
-          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          C:\msys64\mingw64\bin\gcc.exe --version
+          $mingw = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'mingw64'
+          if (-not (Test-Path "$mingw\bin\gcc.exe")) {
+            throw "找不到 $mingw\bin\gcc.exe（msys2-location=${{ steps.msys2.outputs.msys2-location }}）"
+          }
+          $mingw | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "MINGW_DIR=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$mingw\bin\gcc.exe" --version
 
       - name: 装 xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -48,7 +57,8 @@ jobs:
         shell: pwsh
         working-directory: demo/c-main
         run: |
-          xmake f -y --mingw=C:\msys64\mingw64
+          # --mingw= 要的是 MinGW 的**前缀目录**（其下是 bin/），不是 bin/ 本身
+          xmake f -y --mingw="$env:MINGW_DIR"
           xmake -y
 
       - name: 校验产物（存在 + PE 子系统是 GUI）

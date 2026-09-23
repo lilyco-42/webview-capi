@@ -58,3 +58,60 @@ jobs:
           set -euo pipefail
           demo/lyco-cli/lyco/target/release/lyco list
           demo/lyco-cli/lyco/target/release/lyco info
+
+      # 这个 job 跑在 ubuntu / macos 上 —— 正是 `lyco web` 原来必然失败的地方：
+      # 它硬编码 `Command::new("python")`，而这两个系统通常只有 `python3`。
+      # 而且失败被 `let _` 吞掉，用户会被告知「打开浏览器访问 http://localhost:8080」。
+      - name: lyco web 真的能托管页面（且页面不再说谎）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          PORT=8137
+
+          PORT="$PORT" "$LYCO" web > "$OUT/web.log" 2>&1 &
+          WEB_PID=$!
+
+          # 等它起来；进程死了就别再等
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://localhost:$PORT/" -o "$OUT/page.html" 2>/dev/null; then break; fi
+            kill -0 "$WEB_PID" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill "$WEB_PID" 2>/dev/null || true
+          wait "$WEB_PID" 2>/dev/null || true
+
+          echo "--- lyco web 的输出 ---"
+          cat "$OUT/web.log"
+          test -s "$OUT/page.html" || { echo "❌ lyco web 没能提供页面"; exit 1; }
+          grep -q "Lyco WebView Studio" "$OUT/page.html" || { echo "❌ 页面内容不对"; exit 1; }
+
+          # 页面是纯静态演示：既不该泄漏内网地址，也不该再谎报成功
+          if grep -qE '192\.168\.|10\.[0-9]+\.[0-9]+\.[0-9]+' "$OUT/page.html"; then
+            echo "❌ 页面里泄漏了内网地址"; exit 1
+          fi
+          grep -q "UI 预览版" "$OUT/page.html" || { echo "❌ 页面缺少「UI 预览版」提示"; exit 1; }
+          if grep -q "已创建!" "$OUT/page.html"; then echo "❌ 页面仍在谎报「已创建」"; exit 1; fi
+          echo "✅ lyco web 正常，且页面不再说谎"
+
+      # 反向断言：起不来的时候**必须明确失败**，不能打印地址然后返回 0。
+      # PATH 指到空目录 = 机器上没有任何 python（ubuntu/macos 上没有 `py`）。
+      - name: 找不到 python 时必须明确失败
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+
+          set +e
+          env PATH=/nonexistent HOME="$OUT/home" "$LYCO" web > "$OUT/log" 2>&1
+          rc=$?
+          set -e
+
+          echo "--- 输出（退出码 $rc） ---"
+          cat "$OUT/log"
+          test "$rc" -ne 0 || { echo "❌ 找不到 python 时不该返回 0"; exit 1; }
+          grep -q "未找到 python" "$OUT/log" || { echo "❌ 缺少明确提示"; exit 1; }
+          if grep -q "localhost" "$OUT/log"; then echo "❌ 起不来时不该打印访问地址"; exit 1; fi
+          echo "✅ 无 python 时正确失败，并给出了可操作的提示"

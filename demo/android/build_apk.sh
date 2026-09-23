@@ -23,11 +23,11 @@ BT=${LYCO_BUILD_TOOLS:-$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail
 PLAT_JAR=${LYCO_PLATFORM_JAR:-$(ls -d "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)}
 
 if [ ! -d "${BT:-}" ]; then
-  echo "找不到 build-tools（SDK=$SDK）。装一个 build-tools 或用 LYCO_BUILD_TOOLS 指定。" >&2
+  echo "找不到 build-tools（SDK=${SDK}）。装一个 build-tools 或用 LYCO_BUILD_TOOLS 指定。" >&2
   exit 1
 fi
 if [ ! -f "${PLAT_JAR:-}" ]; then
-  echo "找不到 platforms/android-*/android.jar（SDK=$SDK）。装一个 platform 或用 LYCO_PLATFORM_JAR 指定。" >&2
+  echo "找不到 platforms/android-*/android.jar（SDK=${SDK}）。装一个 platform 或用 LYCO_PLATFORM_JAR 指定。" >&2
   exit 1
 fi
 if [ ! -x "$BT/d8$SUF_BAT" ]; then

@@ -39,13 +39,21 @@ jobs:
       - name: 把 MinGW 加进 PATH
         shell: pwsh
         run: |
-          $mingw = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'mingw64'
+          $root  = '${{ steps.msys2.outputs.msys2-location }}'
+          $mingw = Join-Path $root 'mingw64'
           if (-not (Test-Path "$mingw\bin\gcc.exe")) {
-            throw "找不到 $mingw\bin\gcc.exe（msys2-location=${{ steps.msys2.outputs.msys2-location }}）"
+            "msys2-location = $root"
+            "--- $root ---"
+            Get-ChildItem $root -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+            "--- $root\mingw64 ---"
+            Get-ChildItem "$mingw" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+            throw "找不到 $mingw\bin\gcc.exe"
           }
           $mingw | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "MINGW_DIR=$mingw" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "$mingw\bin\gcc.exe" --version
+          # 注意：PowerShell 里 "--version" 的 "--" 会被当参数终结符，
+          # 必须用调用运算符 & 才能把 --version 传给原生程序。
+          & "$mingw\bin\gcc.exe" --version
 
       - name: 装 xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -57,8 +65,9 @@ jobs:
         shell: pwsh
         working-directory: demo/c-main
         run: |
-          # --mingw= 要的是 MinGW 的**前缀目录**（其下是 bin/），不是 bin/ 本身
-          xmake f -y --mingw="$env:MINGW_DIR"
+          # --mingw= 要的是 MinGW 的**前缀目录**（其下是 bin/），不是 bin/ 本身；
+          # 引号包住，避免 PowerShell 对 "--" 开头的 token 做特殊处理。
+          xmake f -y "--mingw=$env:MINGW_DIR"
           xmake -y
 
       - name: 校验产物（存在 + PE 子系统是 GUI）

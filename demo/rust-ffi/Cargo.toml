@@ -11,7 +11,14 @@ categories = ["ffi", "gui"]
 [lib]
 name = "webview_capi"
 path = "src/lib.rs"
-crate-type = ["cdylib", "staticlib"]
+# 必须带 "lib"(rlib)：本 crate 的公开 API 是 Rust 类型
+# （`pub struct WebView` + 收 `&str` 的方法），C 侧调不了，
+# 所以它是要被 Rust 代码 `use` 的绑定库。
+# 原来只有 cdylib/staticlib → 谁也用不了，rustc 直接报：
+#   error[E0433]: cannot find module or crate `webview_capi` in this scope
+#   = help: consider adding 'dylib' or 'rlib' to key 'crate-type' …
+# 这里只做「加」，不删原有产物，保持向后兼容。
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 libc = "0.2"

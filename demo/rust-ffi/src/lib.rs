@@ -8,24 +8,38 @@
 //! webview_destroy(w);
 //! ```
 
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_int, c_void};
+// C 侧类型。用 `pub use` 一次完成「引入 + 对外重导出」——
+// 原来这里还有一行 `use std::os::raw::{c_char, c_int, c_void};`，
+// 和文件末尾的 `pub use` 同名，直接 E0252（the name `c_char` is defined multiple times），
+// 整个 crate 编译不过。
+pub use std::ffi::CString;
+pub use std::os::raw::{c_char, c_int, c_void};
 
 /// Opaque webview handle
+///
+/// 对应 C 侧的 `typedef void *webview_t;`（见 lib/webview.h:197）。
+/// Rust 侧只当不透明指针用，不需要知道内部布局。
+///
+/// `#[repr(C)]` + 零长度字段 = 标准的「不透明 FFI 类型」写法；
+/// 不加 repr 会报 `not FFI-safe: this struct has unspecified layout`。
+#[repr(C)]
 pub struct Webview {
-    // Placeholder - actual implementation in C
+    _private: [u8; 0],
 }
 
+// 返回值说明：C 侧 webview_run / webview_set_* 等返回 `webview_error_t`，
+// 那是个普通 C 枚举（WEBVIEW_ERROR_OK=0 / _FAILED=1 / _NOT_FOUND=2），
+// ABI 上是 int 宽度，所以这里用 c_int 与之等价。
 extern "C" {
     fn webview_create(debug: c_int, window: *mut c_void) -> *mut Webview;
-    fn webview_destroy(w: *mut Webview);
-    fn webview_run(w: *mut Webview) -> i32;
-    fn webview_terminate(w: *mut Webview) -> i32;
-    fn webview_set_title(w: *mut Webview, title: *const c_char);
-    fn webview_set_size(w: *mut Webview, width: c_int, height: c_int, hints: c_int);
-    fn webview_navigate(w: *mut Webview, url: *const c_char);
-    fn webview_set_html(w: *mut Webview, html: *const c_char);
-    fn webview_eval(w: *mut Webview, js: *const c_char) -> i32;
+    fn webview_destroy(w: *mut Webview) -> c_int;
+    fn webview_run(w: *mut Webview) -> c_int;
+    fn webview_terminate(w: *mut Webview) -> c_int;
+    fn webview_set_title(w: *mut Webview, title: *const c_char) -> c_int;
+    fn webview_set_size(w: *mut Webview, width: c_int, height: c_int, hints: c_int) -> c_int;
+    fn webview_navigate(w: *mut Webview, url: *const c_char) -> c_int;
+    fn webview_set_html(w: *mut Webview, html: *const c_char) -> c_int;
+    fn webview_eval(w: *mut Webview, js: *const c_char) -> c_int;
 }
 
 /// Safe wrapper around webview C API
@@ -86,10 +100,7 @@ impl WebView {
 
 impl Drop for WebView {
     fn drop(&mut self) {
-        unsafe { webview_destroy(self.ptr) };
+        // webview_destroy 返回 webview_error_t（int 宽度），丢弃返回值即可
+        let _ = unsafe { webview_destroy(self.ptr) };
     }
 }
-
-// Re-export C types for FFI
-pub use std::ffi::CString;
-pub use std::os::raw::{c_char, c_int, c_void};

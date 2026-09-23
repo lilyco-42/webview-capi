@@ -91,7 +91,7 @@ cl /O2 /MT main.c /link lib\webview.lib ^
 - [demo/python-app](demo/python-app) — Python + pywebview
 - [demo/android](demo/android) — Android WebView APK
 - [demo/wasm-app](demo/wasm-app) — WASM 纯前端
-- [demo/rust-ffi](demo/rust-ffi) — Rust FFI 绑定(cdylib)
+- [demo/rust-ffi](demo/rust-ffi) — Rust FFI 绑定(rlib + cdylib)
 - [demo/lyco-cli](demo/lyco-cli) — Rust CLI 生成器(用本 API 生成项目)
 
 ## 构建产物

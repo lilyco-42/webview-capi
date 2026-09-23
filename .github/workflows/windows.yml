@@ -113,6 +113,95 @@ jobs:
           cargo run --release --locked -- list
           cargo run --release --locked -- info
 
+      # 依赖写法（`{ path }` / `{ git }` / 校验分支）的回归防线。
+      #
+      # 只断言**生成物**：`lyco build` 是「先写 xmake.lua、再调 xmake」，所以
+      # 这一步不依赖 xmake / 编译器是否装好 —— 不会因为 runner 的工具链差异变红，
+      # 也不需要往这个 job 里塞第二个 setup action。
+      # 断言点选的是 add_repositories 那一行：它是 `{ path }` / `{ git }` 在
+      # xmake 侧**唯一**的落地方式，与功能 1:1 对应（比「命令没报错」强得多）。
+      - name: 依赖写法端到端（含错误分支）
+        shell: pwsh
+        run: |
+          # 这一步**故意**要跑会失败的命令（错误分支），所以显式关掉两个会把
+          # 「非零退出 / stderr」升级成终止错误的开关：Actions 的 pwsh 会先设
+          # $ErrorActionPreference='stop'，新版 pwsh 还多了
+          # $PSNativeCommandUseErrorActionPreference（本机 7.6 上是 False，
+          # 但那是版本默认值，不能赌）。关掉它们不会掩盖问题 —— 断言本身用
+          # throw，throw 永远是终止错误。
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
+
+          $lyco = (Resolve-Path 'target/release/lyco.exe').Path
+          $d    = Join-Path $env:RUNNER_TEMP 'lyco-dep-check'
+          Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path "$d/src" -Force | Out-Null
+          Set-Content -Encoding utf8 "$d/Lyco.toml" "[package]`nname = `"depcheck`"`nversion = `"0.1.0`"`n`n[dependencies]`n"
+          Set-Content -Encoding utf8 "$d/src/main.c" "int main(void) { return 0; }"
+
+          # 造一个最小本地 xmake 包仓库。配方故意什么都不做：只为证明
+          # path 能一路解析到 packages/<包名>/xmake.lua，不涉及网络与编译。
+          # 注意 `package("…")` 后面那一段就是它的函数体，**没有**收尾的 `end)`
+          # —— 多写一行 xmake 会报 `<eof> expected near 'end'`。
+          $repo = Join-Path $d 'localrepo'
+          New-Item -ItemType Directory -Path "$repo/packages/z/zzmini" -Force | Out-Null
+          Set-Content -Encoding utf8 "$repo/packages/z/zzmini/xmake.lua" (@(
+            'package("zzmini")'
+            '    set_homepage("https://example.com")'
+            '    on_install(function (package) end)'
+          ) -join "`n")
+
+          function Assert-Fails([string]$desc, [scriptblock]$sb) {
+            # 不用 2>&1 抓输出：那会把 stderr 变成 ErrorRecord，正好撞上上面
+            # 要避开的坑。让它直接打到日志里，我们只要退出码。
+            & $sb
+            if ($LASTEXITCODE -eq 0) { throw "$desc 本该失败, 实际退出码 0" }
+            "  ok  $desc -> 退出码 $LASTEXITCODE"
+          }
+
+          Push-Location $d
+          try {
+            '== 错误分支：必须失败, 且不能留下半个清单 =='
+            $before = Get-Content Lyco.toml -Raw
+            Assert-Fails 'path 不存在'        { & $lyco add zz --path ./nope }
+            if ((Get-Content Lyco.toml -Raw) -ne $before) { throw '校验失败时不该改动 Lyco.toml' }
+            '  ok  校验失败时 Lyco.toml 未被改动'
+            Assert-Fails 'git 与 path 同时给' { & $lyco add zz --git https://example.com/r.git --path ./localrepo }
+            Assert-Fails '未知参数'           { & $lyco add zz --bogus }
+
+            '== 正常分支：写进 Lyco.toml =='
+            & $lyco add zzmini --path ./localrepo
+            if ($LASTEXITCODE -ne 0) { throw 'lyco add --path 失败' }
+            $toml = Get-Content Lyco.toml -Raw
+            if ($toml -notmatch 'zzmini\s*=\s*\{\s*path\s*=\s*"\./localrepo"\s*\}') {
+              throw "Lyco.toml 没写对:`n$toml"
+            }
+            '  ok  Lyco.toml 得到 { path = "./localrepo" }'
+
+            '== 生成物：xmake 侧拿到的是绝对路径、且不含 .. =='
+            # 这句会失败（本 job 没装 xmake），但 xmake.lua 在调 xmake **之前**
+            # 就已写出，所以不影响断言。断言不过的话上面早 throw 了。
+            & $lyco build
+            if (-not (Test-Path xmake.lua)) { throw 'lyco build 没生成 xmake.lua' }
+            $m = [regex]::Match((Get-Content xmake.lua -Raw), 'add_repositories\("zzmini ([^"]+)"\)')
+            if (-not $m.Success) { throw "xmake.lua 里没有 add_repositories(`"zzmini <dir>`")" }
+            $dir = $m.Groups[1].Value
+            "  ok  add_repositories -> $dir"
+            if ($dir -match '\.\.')           { throw "本地仓目录不该含 .. : $dir" }
+            if ($dir -notmatch '^[A-Za-z]:/') { throw "本地仓目录应是绝对路径: $dir" }
+            if (-not (Test-Path (Join-Path $dir 'packages/z/zzmini/xmake.lua'))) {
+              throw "解析出的目录没指到真实包仓库: $dir"
+            }
+            '  ok  绝对路径 / 不含 .. / 指向真实包仓库'
+          } finally { Pop-Location }
+
+          # 这一行不能省：Actions 的 pwsh shell 最后会 `exit $LASTEXITCODE`，
+          # 而上面那句 `lyco build` 是**故意容许失败**的。断言失败的话早就
+          # throw 退出了，走不到这里。
+          exit 0
+
       - name: 上传 lyco.exe
         uses: actions/upload-artifact@v4
         with:

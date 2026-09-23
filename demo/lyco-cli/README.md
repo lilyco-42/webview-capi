@@ -56,7 +56,12 @@ webview-capi = "*"
   (`add_requires` 不接受 `git` 选项), 所以这个 URL 要指向含
   `packages/<名>/xmake.lua` 的包仓库, 而不是普通源码仓 —— 指向错了
   xmake 会明确报「not found in any repository」, 不会静默失败
-- 其余键 (`path` 等) 尚未实现, 写了会被忽略
+- `{ path = "../myrepo" }`: 同上, 但指向**本地**包仓库目录。相对路径会先
+  归一化成绝对路径 —— xmake 要求 `add_repositories` 的本地目录必须是
+  绝对路径、且不能含 `..`, 所以这一步由 lyco 代做。目录不存在时
+  `lyco build` 直接报错, 不会生成一个跑不通的 `xmake.lua`
+- `git` 与 `path` 只能二选一 (同时写会报错)
+- CLI 也能加: `lyco add myrepo --git <URL>` / `lyco add myrepo --path ../myrepo`
 
 ## 傻瓜依赖注册表
 

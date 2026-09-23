@@ -93,6 +93,89 @@ fn dep_git(v: &toml::Value) -> Option<String> {
     }
 }
 
+/// 取 `{ path = "..." }` 里的原始值（未规范化）。
+fn dep_path_raw(v: &toml::Value) -> Option<&str> {
+    match v {
+        toml::Value::Table(t) => t.get("path").and_then(|x| x.as_str()),
+        _ => None,
+    }
+}
+
+/// 把 `{ path = "..." }` 的目录规范化成 xmake 能认的绝对路径。
+///
+/// xmake 侧和 git 走同一个出口（`add_repositories("<名字> <目录>")`），
+/// 但有两组实测得来的硬约束：
+///
+/// 1. **必须是绝对路径** —— 相对路径会被当成 git URL：
+///      add_repositories("myrepo ../localrepo")
+///      -> updating repositories .. error: fatal: repository '../localrepo' does not exist
+/// 2. **不能带 `..`** —— 同理，`C:/a/b/../c` 也被当成 git URL：
+///      fatal: 'C:/…/proj/../localrepo' does not appear to be a git repository
+///
+/// 所以这里自己做**词法**归一化：相对路径接上 CWD 变绝对、再把 `.`/`..` 消掉。
+/// 特意**不用** `canonicalize`，它有两个副作用：
+///   * Windows 上返回 `\\?\C:\…` 这种 verbatim 前缀，写进 Lua 字符串会报
+///     `invalid escape sequence near '"myrepo \?\C'` —— 还得额外剥前缀；
+///   * 目标不存在时直接失败，而报错路径（下面 `dep_path_resolve`）恰恰
+///     需要在「不存在」时也能算出它本来该指向哪。
+/// 词法归一化对 xmake 够用（它只要一个不含 `..` 的绝对路径，不要求真实存在）。
+///
+/// 另一个坑：Lua 字符串里 `\` 是转义符，所以最后统一换成正斜杠。
+fn dep_path_resolve(raw: &str) -> String {
+    let p = Path::new(raw);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
+        }
+    };
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // 别把根/盘符弹掉，否则 "C:/../x" 会变成盘符相对路径
+                let at_root = matches!(
+                    out.components().last(),
+                    None | Some(std::path::Component::RootDir)
+                        | Some(std::path::Component::Prefix(_))
+                );
+                if !at_root {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().replace('\\', "/")
+}
+
+fn dep_path_abs(raw: &str) -> String {
+    dep_path_resolve(raw)
+}
+
+/// 校验 `{ path = "..." }` 指向的目录确实存在。
+///
+/// `add` 与 `gen_xmake_lua` **共用**这一个函数 —— 否则会出现
+/// 「`lyco add` 打印 ✅、紧接着 `lyco build` 报 ❌」这种最气人的组合
+/// （用户点了一个注定失败的按钮，还已经被告知成功）。
+///
+/// 报错里带上解析后的绝对路径：相对路径写错时，光看原文根本看不出
+/// 它被解析到了哪，这是最难查的一类错。
+fn check_dep_path(dep: &str, raw: &str) -> Result<(), String> {
+    if Path::new(raw).exists() {
+        return Ok(());
+    }
+    Err(format!(
+        "依赖 {dep}: path = \"{raw}\" 不存在 (解析为 {})。\n\
+         path 相对项目目录 (Lyco.toml 所在处), 要指向一个 xmake 包仓库 \
+         (含 packages/<包名>/xmake.lua)",
+        dep_path_resolve(raw)
+    ))
+}
+
 fn sample_manifest() -> String {
     format!(
         "未找到 {MANIFEST}。最小示例:\n\n\
@@ -143,10 +226,21 @@ pub fn gen_xmake_lua(m: &Manifest) -> Result<(), String> {
     s.push_str("add_rules(\"mode.debug\", \"mode.release\")\n");
     s.push_str(&format!("add_repositories(\"lyco-mirror {MIRROR}\")\n"));
 
-    // `{ git = "..." }` 的依赖：把那个 URL 当成一个 xmake 包仓库加进来。
-    // 必须在 add_requires 之前声明，xmake 才找得到包（见 dep_git 的注释）。
+    // `{ git = "..." }` / `{ path = "..." }` 的依赖：把那个 URL / 目录
+    // 当成一个 xmake 包仓库加进来。必须在 add_requires 之前声明，
+    // xmake 才找得到包（见 dep_git / dep_path_abs 的注释）。
     for (d, v) in &m.dependencies {
-        if let Some(url) = dep_git(v) {
+        let git = dep_git(v);
+        let p = dep_path_raw(v);
+        if git.is_some() && p.is_some() {
+            return Err(format!("依赖 {d}: `git` 与 `path` 只能二选一, 不能同时写"));
+        }
+        if let Some(raw) = p {
+            // 提前检查, 免得 xmake 给出一句难懂的错误。
+            // 与 `lyco add` 共用同一个检查 —— 保证「add 说行」就等于「build 也行」。
+            check_dep_path(d, raw)?;
+            s.push_str(&format!("add_repositories(\"{d} {}\")\n", dep_path_abs(raw)));
+        } else if let Some(url) = git {
             s.push_str(&format!("add_repositories(\"{d} {url}\")\n"));
         }
     }
@@ -317,8 +411,24 @@ pub fn run(release: bool, target_plat: Option<&str>) -> Result<(), String> {
 }
 
 // ── add / remove (toml_edit 保注释保格式, 与 cargo 同款) ─────
-pub fn add(dep: &str) -> Result<(), String> {
+
+/// 造一个内联表 `{ [version = "…", ] <key> = "<val>" }`，
+/// 用来写 `dep = { version = "1.0", git = "…" }` 这种依赖。
+fn dep_inline(ver: &str, key: &str, val: &str) -> toml_edit::InlineTable {
+    let mut t = toml_edit::InlineTable::new();
+    if !ver.is_empty() && ver != "*" {
+        t.insert("version", toml_edit::Value::from(ver));
+    }
+    t.insert(key, toml_edit::Value::from(val));
+    t
+}
+
+/// `lyco add <dep>[@<ver>] [--git <url> | --path <dir>]`
+pub fn add(dep: &str, git: Option<&str>, path: Option<&str>) -> Result<(), String> {
     if !Path::new(MANIFEST).exists() { return Err(sample_manifest()); }
+    if git.is_some() && path.is_some() {
+        return Err("`--git` 与 `--path` 只能二选一".into());
+    }
     let (name, ver) = match dep.split_once('@') {
         Some((n, v)) => (n.trim().to_string(), v.trim().to_string()),
         None => (dep.trim().to_string(), "*".to_string()),
@@ -328,11 +438,33 @@ pub fn add(dep: &str) -> Result<(), String> {
     if doc.get("dependencies").is_none() {
         doc["dependencies"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    doc["dependencies"][&name] = toml_edit::value(ver);
+    // 先把 path 校验掉再落盘：否则会打印 ✅、随后 `lyco build` 才报 ❌
+    // （用户已经被告知成功，却拿不到能用的 xmake.lua）。
+    if let Some(p) = path {
+        check_dep_path(&name, p)?;
+        // 软提示：xmake 包仓库的固定布局是 packages/<包名>/xmake.lua，
+        // 没有 packages/ 说明这个 path 多半指向了普通源码仓。
+        if !Path::new(p).join("packages").is_dir() {
+            eprintln!(
+                "⚠  {} 下没有 packages/ 目录 —— xmake 包仓库要求 packages/<包名>/xmake.lua，\
+                 确认这个 path 指的是包仓库而不是源码仓",
+                dep_path_resolve(p)
+            );
+        }
+    }
+    let item = if let Some(u) = git {
+        toml_edit::value(dep_inline(ver.as_str(), "git", u))
+    } else if let Some(p) = path {
+        toml_edit::value(dep_inline("", "path", p))
+    } else {
+        toml_edit::value(ver.as_str())
+    };
+    doc["dependencies"][&name] = item;
     fs::write(MANIFEST, doc.to_string()).map_err(|e| e.to_string())?;
+    let src = if git.is_some() { " (git 包仓库)" } else if path.is_some() { " (本地包仓库)" } else { "" };
     match known_syslinks(&name) {
-        Some(sl) => println!("✅ 已添加 {name} (自动镜像源 + 系统库 {})", sl.join(", ")),
-        None => println!("✅ 已添加 {name}"),
+        Some(sl) => println!("✅ 已添加 {name}{src} (自动镜像源 + 系统库 {})", sl.join(", ")),
+        None => println!("✅ 已添加 {name}{src}"),
     }
     Ok(())
 }

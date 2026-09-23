@@ -340,8 +340,54 @@ fn cmd_run(cmd_args: &[String]) {
     let _ = Command::new("xmake").arg("run").status();
 }
 
-fn cmd_add(dep: &str) {
-    if let Err(e) = manifest::add(dep) { eprintln!("❌ {e}"); std::process::exit(1); }
+/// `lyco add <dep>[@<ver>] [--git <url> | --path <dir>]`
+fn cmd_add(args: &[String]) {
+    let mut dep: Option<&str> = None;
+    let mut git: Option<&str> = None;
+    let mut path: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a.starts_with("--") {
+            let (key, inline) = match a.split_once('=') {
+                Some((k, v)) => (k, Some(v)),
+                None => (a, None),
+            };
+            match key {
+                "--git" | "--path" => {
+                    let val = match inline {
+                        Some(v) => v,
+                        None => {
+                            i += 1;
+                            match args.get(i) {
+                                Some(v) => v.as_str(),
+                                None => { eprintln!("{key} 后面要跟一个值"); std::process::exit(1); }
+                            }
+                        }
+                    };
+                    if key == "--git" { git = Some(val) } else { path = Some(val) }
+                }
+                _ => { eprintln!("未知参数: {a}  (支持 --git <url> / --path <dir>)"); std::process::exit(1); }
+            }
+        } else if dep.is_none() {
+            dep = Some(a);
+        } else {
+            eprintln!("多余的参数: {a}");
+            std::process::exit(1);
+        }
+        i += 1;
+    }
+    let dep = match dep {
+        Some(d) => d,
+        None => {
+            eprintln!("用法: lyco add <dep>[@<version>] [--git <url> | --path <dir>]");
+            eprintln!("例:   lyco add webview-capi@1.0");
+            eprintln!("      lyco add webui --git https://github.com/you/pkg-repo.git");
+            eprintln!("      lyco add mypkg --path ../pkg-repo");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = manifest::add(dep, git, path) { eprintln!("❌ {e}"); std::process::exit(1); }
     println!("  下一步: lyco build");
 }
 
@@ -440,7 +486,7 @@ fn print_help() {
 命令:
   new <name> <lang> [url]       新建项目 (含 Lyco.toml)
   init [name]                   在现有目录初始化清单
-  add <dep>[@<ver>]             添加依赖, 例: lyco add webview-capi@1.0
+  add <dep>[@<ver>] [--git|--path]  添加依赖 (例: lyco add webview-capi@1.0)
   remove <dep>                  移除依赖 (保留注释与格式)
   build [-r] [--target <plat>]  构建 (-r = release; 默认 debug)
   check                         语法检查 (不产出目标文件)
@@ -465,6 +511,7 @@ Lyco.toml (与 Cargo.toml 同风格):
   [dependencies]
   webview-capi = "*"                      # WebView 窗口 (自动镜像源+系统库)
   webui = {{ version = "*" }}              # WebUI, 任意浏览器做前端
+  mypkg = {{ git = "https://…/repo.git" }} # 从 git 包仓库取 (也可 path = "../repo")
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 将 .{} 放入 ~/.lyco/commands/ 扩展
@@ -575,8 +622,7 @@ fn main() {
             println!("ℹ 未实现 (roadmap): git tag v<Lyco.toml version> + gh release 上传构建产物");
         }
         "add" => {
-            if cmd_args.is_empty() { eprintln!("用法: lyco add <dep>[@<version>]   例: lyco add webview-capi@1.0"); std::process::exit(1); }
-            cmd_add(&cmd_args[0]);
+            cmd_add(cmd_args);
         }
         "remove" => {
             if cmd_args.is_empty() { eprintln!("用法: lyco remove <dep>"); std::process::exit(1); }

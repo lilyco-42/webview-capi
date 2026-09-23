@@ -51,7 +51,12 @@ webview-capi = "*"
 
 - `lyco build` 每次从清单重新生成 `xmake.lua` (生成物, 勿手编)
 - 依赖写法与 Cargo.toml 同风格: `"1.0"` 或 `{ version = "1.0" }`
-  (目前只读 `version` 键; `git` / `path` 等尚未实现, 写了会被忽略)
+- `{ git = "URL" }`: 把该 URL 当 **xmake 包仓库** 加进 `xmake.lua`
+  (即 `add_repositories("<依赖名> <URL>")`)。注意 xmake **没有 per-包 的 git 源**
+  (`add_requires` 不接受 `git` 选项), 所以这个 URL 要指向含
+  `packages/<名>/xmake.lua` 的包仓库, 而不是普通源码仓 —— 指向错了
+  xmake 会明确报「not found in any repository」, 不会静默失败
+- 其余键 (`path` 等) 尚未实现, 写了会被忽略
 
 ## 傻瓜依赖注册表
 

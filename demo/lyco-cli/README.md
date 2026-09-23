@@ -88,8 +88,10 @@ cargo build --release   # 产物 target/release/lyco.exe
 
 - `lyco web` — 可视化 Web UI（**UI 预览版**，需 `python3`/`python`；页面是纯静态演示，
   按钮尚未接入后端，实际操作请用命令行）
-- `lyco reset` — 重置 ~/.lyco/ (模板随 lyco 版本自动更新)
+- `lyco reset` — 重置 ~/.lyco/（模板在 lyco 升级**或模板内容变化**时更新）
 - `lyco info` / `lyco list` — 配置信息(含当前项目) / 已注册项目 + 命令列表
+- 模板: `~/.lyco/templates/` 可以直接编辑。更新时**只覆盖你没改过的文件** ——
+  改过的会被保留，并在输出里列出来（要换成新版就先把它们移走）。
 - 插件: 在 `~/.lyco/commands/` 里放**两个**文件 ——
   `xxx.dll`(Linux/macOS 上是 `xxx.so`) 作为标记，以及同名的可执行文件
   `xxx.exe`(Linux/macOS 上是 `xxx`)。之后 `lyco xxx` 就会调用它。

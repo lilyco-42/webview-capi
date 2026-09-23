@@ -176,18 +176,88 @@ const ALL_TEMPLATES: &[(&str, &str)] = &[
     ("README.md", TEMPLATE_README),
 ];
 
-fn release_templates(force: bool) -> std::io::Result<()> {
+/// 已释放内容的清单：每行 `<fnv1a 十六进制>\t<相对路径>`。
+/// 用途：重释放时区分「用户没动过」（可安全覆盖）与「用户改过」（必须保留）。
+fn manifest_path() -> PathBuf { templates_dir().join(".manifest") }
+
+fn released_hashes() -> Vec<(String, String)> {
+    fs::read_to_string(manifest_path())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.split_once('\t'))
+                .map(|(h, n)| (n.to_string(), h.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 释放内嵌模板，返回**被保留**（用户改过、没覆盖）的文件名。
+///
+/// 策略：**只覆盖用户没动过的文件**。判据是 `.manifest`（上次释放时各文件的哈希）：
+///
+/// * 没有清单、或清单里一条可用条目都没有（首次安装、从还没有清单的旧版本升上来、
+///   清单损坏）→ 无从判断，按老行为覆盖 —— 旧版本本来就在升级时全覆盖，
+///   所以这不是倒退，而是迁移；
+/// * 有清单、且当前内容与清单一致 → 用户没动过 → 覆盖成新版；
+/// * 有清单、但内容不一致 → **用户改过 → 保留**，只把文件名报回去。
+///
+/// 刻意保留的行为：**文件被删掉时会写回来**。删掉也算"动过"，但一个残缺的模板集
+/// 是坏状态（虽然 `read_template_or_default` 会兜底），而误删后无声地永久缺一个文件
+/// 更难排查。所以这里选择"恢复并让人看见"。
+///
+/// 这样「编辑 `~/.lyco/templates/` 定制」才真的能用：以前任何一次升级
+/// （现在是任何一次模板改动）都会把定制**无声**抹掉。
+fn release_templates() -> std::io::Result<Vec<String>> {
     let dir = templates_dir();
     fs::create_dir_all(&dir)?;
-    for (name, content) in ALL_TEMPLATES {
-        let p = dir.join(name);
-        if force || !p.exists() { fs::write(&p, content)?; }
-    }
     let web = web_dir();
     fs::create_dir_all(&web)?;
-    let web_index = web.join("index.html");
-    if force || !web_index.exists() { fs::write(&web_index, TEMPLATE_WEB_HTML)?; }
-    Ok(())
+
+    let mut jobs: Vec<(String, &str, PathBuf)> = ALL_TEMPLATES
+        .iter()
+        .map(|(n, c)| ((*n).to_string(), *c, dir.join(n)))
+        .collect();
+    jobs.push((
+        "web/index.html".to_string(),
+        TEMPLATE_WEB_HTML,
+        web.join("index.html"),
+    ));
+
+    let prev = released_hashes();
+    // 清单里**一条可用条目都没有** = 无从判断 → 按老行为覆盖。
+    //
+    // 这里刻意判「有没有条目」而不是「文件在不在」：清单损坏或被清空时，
+    // 后者会让每个文件都落进 `(Some(_), None) => !force` 那一支 ——
+    // 全部被当成「用户改过」保留，且清单又被重写成空，**从此模板更新永久失效**
+    // （每次只打一行警告，不报错）。判条目为空可以让这种状态**自愈**：
+    // 覆盖一次、清单重建，下次就正常了。
+    // 正常写出的清单永远非空（jobs 固定 15 项，至少有一项会被写入），
+    // 所以这个判据与「没有清单」在实际场景下等价。
+    let force = prev.is_empty();
+    let mut kept = Vec::new();
+    let mut manifest = String::new();
+
+    for (rel, content, dest) in jobs {
+        let prev_hash = prev.iter().find(|(n, _)| *n == rel).map(|(_, h)| h.clone());
+        let cur = fs::read_to_string(&dest).ok();
+        let user_modified = match (cur.as_ref(), prev_hash.as_ref()) {
+            (Some(c), Some(h)) => &hash_str(c) != h,
+            (Some(_), None) => !force,
+            (None, _) => false, // 文件不存在 → 直接写
+        };
+        if user_modified {
+            kept.push(rel.clone());
+            // 清单里仍记「上次释放的内容」—— 用户文件保持不动
+            if let Some(h) = prev_hash {
+                manifest.push_str(&format!("{h}\t{rel}\n"));
+            }
+            continue;
+        }
+        fs::write(&dest, content)?;
+        manifest.push_str(&format!("{}\t{rel}\n", hash_str(content)));
+    }
+    let _ = fs::write(manifest_path(), manifest);
+    Ok(kept)
 }
 
 /// FNV-1a 64 位。自己实现而不引依赖：只要输入相同、结果永远相同
@@ -197,6 +267,12 @@ fn fnv1a(h: &mut u64, bytes: &[u8]) {
         *h ^= u64::from(*b);
         *h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
+}
+
+fn hash_str(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    fnv1a(&mut h, s.as_bytes());
+    format!("{h:016x}")
 }
 
 /// 模板内容指纹：按固定顺序把「文件名 + 内容」喂进 FNV-1a。
@@ -224,11 +300,17 @@ fn ensure_initialized() {
     let stale = fs::read_to_string(&stamp).map(|v| v.trim() != want).unwrap_or(true);
     if !templates_dir().exists() || stale {
         if templates_dir().exists() {
-            println!("📦 lyco v{ver}: 模板已更新并重新释放 (自定义修改请先备份 ~/.lyco/templates/)");
+            println!("📦 lyco v{ver}: 模板已更新");
         } else {
             println!("📦 首次运行,释放默认模板...");
         }
-        release_templates(templates_dir().exists()).expect("释放失败");
+        let kept = release_templates().expect("释放失败");
+        if !kept.is_empty() {
+            println!(
+                "   ⚠  以下模板你改过, 已保留未覆盖 (要换成新版请先移走它们): {}",
+                kept.join(", ")
+            );
+        }
         let _ = fs::create_dir_all(templates_dir());
         let _ = fs::write(&stamp, &want);
     }
@@ -556,7 +638,15 @@ fn cmd_info() {
     let d = data_dir();
     println!("📁 {}", d.display());
     if d.exists() {
-        let t = fs::read_dir(templates_dir()).map(|r| r.count()).unwrap_or(0);
+        // 只数真正的模板。`.version` / `.manifest` 是内部文件，不是模板 ——
+        // 它们混在计数里会让人以为模板数变了。
+        let t = fs::read_dir(templates_dir())
+            .map(|r| {
+                r.filter_map(|e| e.ok())
+                    .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0);
         let c = fs::read_dir(commands_dir()).map(|r| r.count()).unwrap_or(0);
         let n = db::list_projects().len();
         println!("  模板: {t} 文件 | 外部命令: {c} 文件 | 已注册项目: {n} 个");
@@ -650,7 +740,7 @@ Lyco.toml (与 Cargo.toml 同风格):
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
-模板: 编辑 ~/.lyco/templates/ 定制 (随 lyco 升级自动更新, 升级前请备份)
+模板: 编辑 ~/.lyco/templates/ 定制 (升级时只覆盖你没改过的, 改动会被保留)
 "#),
         if cfg!(windows) { "dll" } else { "so" },
         if cfg!(windows) { ".exe" } else { "" }

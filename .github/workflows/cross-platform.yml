@@ -194,3 +194,60 @@ jobs:
             echo "❌ 第二次仍然重释放 —— 版本戳不稳定"; exit 1
           fi
           echo "✅ 老用户的旧模板被更新，且版本戳稳定（不重复释放）"
+
+      # 上面那一条只保证「老用户能拿到新模板」；这一条保证**代价不是抹掉定制**。
+      # 帮助文本明确邀请用户编辑 ~/.lyco/templates/ 定制，但原来的释放逻辑是
+      # 「无条件覆盖」—— 任何一次模板更新都会把定制**无声**抹掉
+      # （帮助里那句「升级前请备份」其实就是这个设计缺陷的自白）。
+      # 现在按 `.manifest`（上次释放时各文件的哈希）区分：
+      # 没动过的覆盖成新版，动过的保留并在输出里列出来。
+      - name: 用户改过的模板不会被无声抹掉
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="$PWD"
+          LYCO="$REPO/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          export HOME="$OUT/home"
+          MAN="$HOME/.lyco/templates/.manifest"
+          mkdir -p "$HOME"
+          cd "$OUT"
+
+          # ① 先正常装一次，建立清单（14 个模板 + web/index.html）
+          "$LYCO" new demo c
+          test -f "$MAN" || { echo "❌ 没有生成 .manifest"; exit 1; }
+          n="$(wc -l < "$MAN")"
+          test "$n" -eq 15 || { echo "❌ 清单条目数不对: $n"; exit 1; }
+
+          # ② 用户定制一个模板
+          printf '/* USER-EDIT */\n' > "$HOME/.lyco/templates/main.c"
+
+          # ③ 模拟「模板又更新了」：让版本戳失配（指纹一变就是这个效果）
+          printf '1.2.0-0000000000000000' > "$HOME/.lyco/templates/.version"
+          rm -rf demo2
+          "$LYCO" new demo2 c > "$OUT/log" 2>&1
+          cat "$OUT/log"
+
+          grep -q 'USER-EDIT' "$HOME/.lyco/templates/main.c" \
+            || { echo "❌ 用户定制被覆盖了"; exit 1; }
+          grep -q '已保留未覆盖' "$OUT/log" \
+            || { echo "❌ 保留/覆盖的结果没有告诉用户"; exit 1; }
+          grep -q 'main.c' "$OUT/log" || { echo "❌ 没点名被保留的文件"; exit 1; }
+          # 没改过的文件仍要拿到新版
+          cmp -s "$REPO/demo/lyco-cli/lyco/templates/README.md" "$HOME/.lyco/templates/README.md" \
+            || { echo "❌ 没改过的模板没被更新"; exit 1; }
+
+          # ④ 清单损坏时必须自愈。否则每个文件都会落进「没有清单条目」那一支、
+          #    被当成「用户改过」保留，清单又被重写成空 ——
+          #    **模板更新从此永久失效**，而只打一行警告、不报错。
+          printf 'garbage-without-tab\n' > "$MAN"
+          printf '1.2.0-0000000000000000' > "$HOME/.lyco/templates/.version"
+          rm -rf demo3
+          "$LYCO" new demo3 c > /dev/null 2>&1
+          n="$(wc -l < "$MAN")"
+          test "$n" -eq 15 || { echo "❌ 清单损坏后没能自愈: $n 行"; exit 1; }
+          # 不能用 grep -E '\t'（grep -E 不把 \t 当制表符，要 -P，而 macOS 没有 -P）
+          awk -F"$(printf '\t')" '{ if (NF != 2 || length($1) != 16) bad = 1 } END { exit bad + 0 }' "$MAN" \
+            || { echo "❌ 自愈后的清单格式不对"; exit 1; }
+
+          echo "✅ 定制被保留并告知用户；清单损坏能自愈"

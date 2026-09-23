@@ -191,7 +191,44 @@ fn released_hashes() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-/// 释放内嵌模板，返回**被保留**（用户改过、没覆盖）的文件名。
+/// `release_templates` 的结果 —— 用来决定该跟用户说什么。
+#[derive(Default)]
+struct ReleaseReport {
+    /// 用户改过、被保留（没覆盖）的文件
+    kept: Vec<String>,
+    /// 覆盖前成功备份过的文件
+    backed_up: Vec<String>,
+    /// 想备份但失败了 —— 这些文件的**原内容已经丢了**，必须报出来
+    backup_failed: Vec<String>,
+    /// 备份目录（`backed_up` 非空时才有）
+    backup_dir: Option<PathBuf>,
+    /// 是否走了「无从判断 → 按老行为覆盖」那条路
+    forced: bool,
+}
+
+/// 把版本戳变成安全的目录名。
+///
+/// 戳是从**用户可写的文件**（`~/.lyco/templates/.version`）里读出来的，
+/// 不能让 `..`、`/`、`\` 之类穿进路径 —— 一个 `..` 就能把备份写到 `~/.lyco/` 里去。
+/// 也不能让结果以 `.` 开头（隐藏目录 = 用户看不见自己的备份）。
+fn sanitize_stamp(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }
+        })
+        .collect();
+    // 再去掉开头的 `.` / `-` / `_`：
+    // * 开头的 `.` 会让目录**变成隐藏目录**（`..evil` → `.._evil`）—— 用户备份完
+    //   用自己的 `ls` 根本看不见，等于没备份；
+    // * 开头的 `-` 会让目录名在命令行里长得像选项。
+    // 顺带覆盖了「`..` / `___` 这类没信息量的名字」→ 落到 `unknown`。
+    let out = mapped.trim_start_matches(['.', '-', '_']);
+    if out.is_empty() { "unknown".to_string() } else { out.to_string() }
+}
+
+/// 释放内嵌模板。
 ///
 /// 策略：**只覆盖用户没动过的文件**。判据是 `.manifest`（上次释放时各文件的哈希）：
 ///
@@ -201,13 +238,21 @@ fn released_hashes() -> Vec<(String, String)> {
 /// * 有清单、且当前内容与清单一致 → 用户没动过 → 覆盖成新版；
 /// * 有清单、但内容不一致 → **用户改过 → 保留**，只把文件名报回去。
 ///
+/// 另外，**凡是要覆盖掉一份不同的内容，先把它备份**到
+/// `~/.lyco/backup/<旧版本戳>/`。这是兜底：迁移那一次和清单损坏自愈那一次，
+/// 我们**无从判断**哪些文件是用户的心血，备份至少让损失可恢复；
+/// 「存在但读不出来」（非 UTF-8）的文件也是靠这一层救回来的
+/// —— 否则它会被当成"不存在"直接覆盖掉。
+///
 /// 刻意保留的行为：**文件被删掉时会写回来**。删掉也算"动过"，但一个残缺的模板集
 /// 是坏状态（虽然 `read_template_or_default` 会兜底），而误删后无声地永久缺一个文件
 /// 更难排查。所以这里选择"恢复并让人看见"。
 ///
 /// 这样「编辑 `~/.lyco/templates/` 定制」才真的能用：以前任何一次升级
 /// （现在是任何一次模板改动）都会把定制**无声**抹掉。
-fn release_templates() -> std::io::Result<Vec<String>> {
+///
+/// `old_stamp` 只用来给备份目录命名（= 用户升级前的那一版），取不到时用 `unknown`。
+fn release_templates(old_stamp: &str) -> std::io::Result<ReleaseReport> {
     let dir = templates_dir();
     fs::create_dir_all(&dir)?;
     let web = web_dir();
@@ -234,30 +279,55 @@ fn release_templates() -> std::io::Result<Vec<String>> {
     // 正常写出的清单永远非空（jobs 固定 15 项，至少有一项会被写入），
     // 所以这个判据与「没有清单」在实际场景下等价。
     let force = prev.is_empty();
-    let mut kept = Vec::new();
+    let mut rep = ReleaseReport { forced: force, ..Default::default() };
     let mut manifest = String::new();
 
     for (rel, content, dest) in jobs {
         let prev_hash = prev.iter().find(|(n, _)| *n == rel).map(|(_, h)| h.clone());
+        let existed = dest.exists();
         let cur = fs::read_to_string(&dest).ok();
         let user_modified = match (cur.as_ref(), prev_hash.as_ref()) {
             (Some(c), Some(h)) => &hash_str(c) != h,
             (Some(_), None) => !force,
-            (None, _) => false, // 文件不存在 → 直接写
+            // 不存在，或存在但**读不出来**（非 UTF-8）→ 覆盖。
+            // 后者会在下面先被备份，所以不算无声丢失。
+            (None, _) => false,
         };
         if user_modified {
-            kept.push(rel.clone());
+            rep.kept.push(rel.clone());
             // 清单里仍记「上次释放的内容」—— 用户文件保持不动
             if let Some(h) = prev_hash {
                 manifest.push_str(&format!("{h}\t{rel}\n"));
             }
             continue;
         }
+
+        // 要覆盖掉一份**不同的**内容 → 先备份，否则这次覆盖不可恢复。
+        // （内容一模一样就没必要备份。）
+        if existed && cur.as_deref() != Some(content) {
+            let target = {
+                if rep.backup_dir.is_none() {
+                    rep.backup_dir =
+                        Some(data_dir().join("backup").join(sanitize_stamp(old_stamp)));
+                }
+                rep.backup_dir.as_ref().unwrap().join(&rel)
+            };
+            if let Some(p) = target.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+            if fs::copy(&dest, &target).is_ok() {
+                rep.backed_up.push(rel.clone());
+            } else {
+                // 备份失败就不能不吭声 —— 这次覆盖是真的会丢内容
+                rep.backup_failed.push(rel.clone());
+            }
+        }
+
         fs::write(&dest, content)?;
         manifest.push_str(&format!("{}\t{rel}\n", hash_str(content)));
     }
     let _ = fs::write(manifest_path(), manifest);
-    Ok(kept)
+    Ok(rep)
 }
 
 /// FNV-1a 64 位。自己实现而不引依赖：只要输入相同、结果永远相同
@@ -297,18 +367,44 @@ fn ensure_initialized() {
     let ver = env!("CARGO_PKG_VERSION");
     let want = format!("{ver}-{}", templates_fingerprint());
     let stamp = templates_dir().join(".version");
-    let stale = fs::read_to_string(&stamp).map(|v| v.trim() != want).unwrap_or(true);
+    let old_stamp = fs::read_to_string(&stamp).unwrap_or_default();
+    let stale = old_stamp.trim() != want;
     if !templates_dir().exists() || stale {
-        if templates_dir().exists() {
-            println!("📦 lyco v{ver}: 模板已更新");
-        } else {
+        // 注意：必须在 release_templates 之前取 —— 它自己会 create_dir_all
+        let first = !templates_dir().exists();
+        let rep = match release_templates(old_stamp.trim()) {
+            Ok(r) => r,
+            Err(e) => {
+                // 释放失败不该让整个命令挂掉：模板读不到时
+                // `read_template_or_default` 会回退到内嵌默认值，功能照常。
+                eprintln!("⚠  模板释放失败 ({e}); 本次使用内嵌默认模板");
+                return; // 不写版本戳 → 下次再试
+            }
+        };
+        if first {
             println!("📦 首次运行,释放默认模板...");
+        } else if rep.forced {
+            println!("📦 lyco v{ver}: 模板已更新 (本地注册表缺失或损坏, 本次按默认模板覆盖)");
+        } else {
+            println!("📦 lyco v{ver}: 模板已更新");
         }
-        let kept = release_templates().expect("释放失败");
-        if !kept.is_empty() {
+        if !rep.kept.is_empty() {
             println!(
                 "   ⚠  以下模板你改过, 已保留未覆盖 (要换成新版请先移走它们): {}",
-                kept.join(", ")
+                rep.kept.join(", ")
+            );
+        }
+        if let Some(b) = &rep.backup_dir {
+            println!(
+                "   💾 有 {} 个文件被新版本覆盖, 覆盖前的原内容已备份到 {}",
+                rep.backed_up.len(),
+                b.display()
+            );
+        }
+        if !rep.backup_failed.is_empty() {
+            println!(
+                "   ❌ 以下文件**备份失败**, 覆盖前的原内容已丢失: {}",
+                rep.backup_failed.join(", ")
             );
         }
         let _ = fs::create_dir_all(templates_dir());

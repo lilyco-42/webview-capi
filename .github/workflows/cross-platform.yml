@@ -251,3 +251,85 @@ jobs:
             || { echo "❌ 自愈后的清单格式不对"; exit 1; }
 
           echo "✅ 定制被保留并告知用户；清单损坏能自愈"
+
+      # 上一条只保证「用户改过的文件被保留」。**保留**救不了另一种情形：
+      # 我们主动覆盖掉一份**不同的**内容。有三条路会走到这里 ——
+      #   ① 迁移：老用户本地没有清单，无从判断谁被改过，只能全按默认覆盖；
+      #   ② 清单损坏自愈：同上（这是刻意的取舍，比"更新永久失效"好）；
+      #   ③ 文件存在但**读不出来**（用户用 GBK 存了模板）→ 被当成"不存在"直接覆盖。
+      # 这三条路上用户的数据会无声消失。所以覆盖前一律先备份到
+      # ~/.lyco/backup/<旧版本戳>/ 并把路径打出来。
+      - name: 覆盖前必须备份（迁移 / 清单损坏 / 非 UTF-8 都会丢内容）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          export HOME="$OUT/home"
+          T="$HOME/.lyco/templates"
+          BK="$HOME/.lyco/backup"
+          mkdir -p "$T" "$HOME/.lyco/web"
+          cd "$OUT"
+
+          # ① 迁移：老用户只有旧式版本戳、没有清单 → 无从判断，会覆盖。
+          #    覆盖掉的东西必须能找回，**含嵌套路径**（web/index.html）。
+          printf '1.2.0' > "$T/.version"
+          printf '/* OLD-MAIN-C 老用户的心血 */\n' > "$T/main.c"
+          printf '<html>OLD-PAGE</html>' > "$HOME/.lyco/web/index.html"
+          "$LYCO" new demo c > "$OUT/log1" 2>&1
+          cat "$OUT/log1"
+          grep -q '已备份到' "$OUT/log1" || { echo "❌ 覆盖了却没说备份到哪"; exit 1; }
+          printf '/* OLD-MAIN-C 老用户的心血 */\n' > "$OUT/exp1"
+          cmp -s "$OUT/exp1" "$BK/1.2.0/main.c" \
+            || { echo "❌ 老用户的 main.c 没被备份"; exit 1; }
+          printf '<html>OLD-PAGE</html>' > "$OUT/exp2"
+          cmp -s "$OUT/exp2" "$BK/1.2.0/web/index.html" \
+            || { echo "❌ 嵌套路径 web/index.html 没被备份"; exit 1; }
+
+          # ② 内容没变就不该备份 —— 备份是留给"真会丢的东西"的，别制造噪音
+          rm -rf "$BK"
+          printf '1.2.0-0000000000000000' > "$T/.version"
+          "$LYCO" new demo2 c > "$OUT/log2" 2>&1
+          if [ -e "$BK" ]; then echo "❌ 内容没变却产生了备份"; exit 1; fi
+
+          # ③ 非 UTF-8：文件存在但读不出来。没有备份这一层，
+          #    用户用 GBK 存的模板就被当成"不存在"直接覆盖、原字节无声丢掉。
+          printf '\xd6\xd0\xce\xc4\xb2\xe2\xca\xd4' > "$T/main.c"
+          before="$(wc -c < "$T/main.c" | tr -d ' ')"
+          printf '1.2.0-0000000000000000' > "$T/.version"
+          "$LYCO" new demo3 c > "$OUT/log3" 2>&1
+          test -f "$BK/1.2.0-0000000000000000/main.c" \
+            || { echo "❌ 非 UTF-8 文件没被备份（原字节已丢）"; exit 1; }
+          after="$(wc -c < "$BK/1.2.0-0000000000000000/main.c" | tr -d ' ')"
+          test "$after" -eq "$before" \
+            || { echo "❌ 备份字节数不对: $before -> $after"; exit 1; }
+
+          # ④ 清单损坏自愈那一次同样会覆盖 → 也要有备份
+          rm -rf "$BK"
+          printf '/* CUSTOM-X */\n' > "$T/main.c"
+          printf 'garbage-without-tab\n' > "$T/.manifest"
+          printf '1.2.0-0000000000000000' > "$T/.version"
+          "$LYCO" new demo4 c > "$OUT/log4" 2>&1
+          grep -q '注册表缺失或损坏' "$OUT/log4" || { echo "❌ 没说明为什么按默认覆盖"; exit 1; }
+          printf '/* CUSTOM-X */\n' > "$OUT/exp4"
+          cmp -s "$OUT/exp4" "$BK/1.2.0-0000000000000000/main.c" \
+            || { echo "❌ 清单损坏那次丢掉的定制没进备份"; exit 1; }
+
+          # ⑤ 备份目录名来自**用户可写的文件**（.version），所以
+          #    既不能穿出 backup/，也不能是隐藏目录 —— 隐藏目录用户 ls 看不见，
+          #    等于没备份。
+          rm -rf "$BK" "$T" "$HOME/.lyco/web"
+          mkdir -p "$T" "$HOME/.lyco/web"
+          printf '../evil' > "$T/.version"
+          printf '/* OLD */\n' > "$T/main.c"
+          "$LYCO" new demo5 c > "$OUT/log5" 2>&1
+          if [ -e "$HOME/.lyco/evil" ]; then
+            echo "❌ 备份跑出了 backup/（路径穿越）"; exit 1
+          fi
+          test -d "$BK/evil" \
+            || { echo "❌ 备份目录名不对，实际: $(ls -A "$BK" 2>/dev/null | tr '\n' ' ')"; exit 1; }
+          if ls -A "$BK" | grep -q '^\.'; then
+            echo "❌ 备份目录是隐藏的（用户看不见自己的备份）"; exit 1
+          fi
+
+          echo "✅ 覆盖前都会备份，且备份目录可发现、路径不可穿越"

@@ -190,20 +190,47 @@ fn release_templates(force: bool) -> std::io::Result<()> {
     Ok(())
 }
 
+/// FNV-1a 64 位。自己实现而不引依赖：只要输入相同、结果永远相同
+/// （std 的 `DefaultHasher` 不保证跨 Rust 版本稳定）。
+fn fnv1a(h: &mut u64, bytes: &[u8]) {
+    for b in bytes {
+        *h ^= u64::from(*b);
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+/// 模板内容指纹：按固定顺序把「文件名 + 内容」喂进 FNV-1a。
+fn templates_fingerprint() -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (name, content) in ALL_TEMPLATES {
+        fnv1a(&mut h, name.as_bytes());
+        fnv1a(&mut h, b"\0"); // 分隔符: 防止 ("ab","c") 与 ("a","bc") 撞
+        fnv1a(&mut h, content.as_bytes());
+        fnv1a(&mut h, b"\0");
+    }
+    fnv1a(&mut h, b"web/index.html\0");
+    fnv1a(&mut h, TEMPLATE_WEB_HTML.as_bytes());
+    format!("{h:016x}")
+}
+
 fn ensure_initialized() {
-    // 版本戳: lyco 升级后自动重释放模板 (用户自定义会被覆盖, 提示备份)
+    // 版本戳 = 版本号 + **模板内容指纹**。只比对版本号是不够的：
+    // 模板改了但 Cargo.toml 的版本没动时（例如只改 web.html 的文案），
+    // 老用户永远拿不到新模板 —— 实测踩到过：~/.lyco/web/index.html 里一直
+    // 留着旧页面（含一个开发机内网地址），因为 .version 还写着 1.2.0。
+    let ver = env!("CARGO_PKG_VERSION");
+    let want = format!("{ver}-{}", templates_fingerprint());
     let stamp = templates_dir().join(".version");
-    let cur = env!("CARGO_PKG_VERSION");
-    let stale = fs::read_to_string(&stamp).map(|v| v.trim() != cur).unwrap_or(true);
+    let stale = fs::read_to_string(&stamp).map(|v| v.trim() != want).unwrap_or(true);
     if !templates_dir().exists() || stale {
         if templates_dir().exists() {
-            println!("📦 lyco v{cur}: 模板已更新并重新释放 (自定义修改请先备份 ~/.lyco/templates/)");
+            println!("📦 lyco v{ver}: 模板已更新并重新释放 (自定义修改请先备份 ~/.lyco/templates/)");
         } else {
             println!("📦 首次运行,释放默认模板...");
         }
         release_templates(templates_dir().exists()).expect("释放失败");
         let _ = fs::create_dir_all(templates_dir());
-        let _ = fs::write(templates_dir().join(".version"), cur);
+        let _ = fs::write(&stamp, &want);
     }
 }
 

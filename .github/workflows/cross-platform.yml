@@ -155,3 +155,42 @@ jobs:
           grep -q "未找到 python" "$OUT/log" || { echo "❌ 缺少明确提示"; exit 1; }
           if grep -q "localhost" "$OUT/log"; then echo "❌ 起不来时不该打印访问地址"; exit 1; fi
           echo "✅ 无 python 时正确失败，并给出了可操作的提示"
+
+      # 回归防线：老用户必须能拿到新模板。
+      # 版本戳原来只存 CARGO_PKG_VERSION —— 模板改了但 Cargo.toml 版本没动时
+      # （很常见，比如只改 web.html 的文案），老用户永远拿不到新模板。
+      # 实测现场：~/.lyco/web/index.html 里一直留着含开发机内网地址的旧页面，
+      # 而 .version 还写着 1.2.0（= 当前版本），**而且完全静默、连提示都没有**。
+      # 现在版本戳 = 版本号 + 模板内容指纹，这一条就是防它退回"只看版本号"。
+      - name: 老用户的旧模板会被自动更新（版本戳含内容指纹）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          export HOME="$OUT/home"
+          mkdir -p "$HOME/.lyco/templates" "$HOME/.lyco/web"
+
+          # 造一个"老用户"现场：旧式版本戳（只有版本号）+ 旧模板
+          printf '1.2.0' > "$HOME/.lyco/templates/.version"
+          printf '<html>OLD PAGE http://192.168.10.165:8765</html>' > "$HOME/.lyco/web/index.html"
+          printf '/* OLD-MARKER */' > "$HOME/.lyco/templates/main.c"
+
+          cd "$OUT"
+          "$LYCO" new demo c
+
+          if grep -q "OLD PAGE" "$HOME/.lyco/web/index.html"; then
+            echo "❌ 老用户的旧页面没被更新（版本戳是不是又只看版本号了？）"; exit 1
+          fi
+          grep -q "UI 预览版" "$HOME/.lyco/web/index.html" || { echo "❌ 新页面没到位"; exit 1; }
+          if grep -q "OLD-MARKER" "$HOME/.lyco/templates/main.c"; then
+            echo "❌ 模板没被更新"; exit 1
+          fi
+          grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{16}$' "$HOME/.lyco/templates/.version" \
+            || { echo "❌ 版本戳里没有内容指纹"; exit 1; }
+
+          # 幂等：再跑一次不该重复释放。指纹不稳定的话会每次都覆盖用户自定义。
+          if "$LYCO" new demo2 c | grep -q "模板已更新"; then
+            echo "❌ 第二次仍然重释放 —— 版本戳不稳定"; exit 1
+          fi
+          echo "✅ 老用户的旧模板被更新，且版本戳稳定（不重复释放）"

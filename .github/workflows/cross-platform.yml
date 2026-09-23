@@ -333,3 +333,79 @@ jobs:
           fi
 
           echo "✅ 覆盖前都会备份，且备份目录可发现、路径不可穿越"
+      - name: 备份不会无限堆积（保留最近 N 份, 且只动自己的东西）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          export HOME="$OUT/home"
+          T="$HOME/.lyco/templates"
+          W="$HOME/.lyco/web"
+          BK="$HOME/.lyco/backup"
+          mkdir -p "$T" "$W"
+          cd "$OUT"
+
+          # ① 真实产生一份备份（老用户现场），并检查自述文件
+          printf '1.2.0' > "$T/.version"
+          printf '/* OLD-MAIN-C */\n' > "$T/main.c"
+          printf '<html>OLD-PAGE</html>' > "$W/index.html"
+          "$LYCO" new demo c > "$OUT/log1" 2>&1
+          REAL="$(ls -A "$BK" 2>/dev/null | head -1)"
+          test -n "$REAL" || { echo "❌ 没有产生备份"; exit 1; }
+          test -f "$BK/$REAL/.meta" || { echo "❌ 备份里没有 .meta（用户看不懂这是哪一版留下的）"; exit 1; }
+          grep -q '^created=' "$BK/$REAL/.meta" || { echo "❌ .meta 缺 created="; exit 1; }
+          grep -q '^replaced_by=1.2.0-' "$BK/$REAL/.meta" || { echo "❌ .meta 缺 replaced_by（应写新版戳）"; exit 1; }
+
+          # ② 塞 12 份"更早的"备份（created 递增，便于断言删的是**最旧的**），
+          #    外加两份"不是我们的东西"：用户自己的目录 + 一个散落文件。
+          for i in 01 02 03 04 05 06 07 08 09 10 11 12; do
+            d="$BK/1.0.$i-aaaaaaaaaaaaaa$i"
+            mkdir -p "$d"
+            printf 'created=1000000%s\nreplaced_by=x\n' "$i" > "$d/.meta"
+          done
+          mkdir -p "$BK/my-own-notes"
+          printf 'do not touch\n' > "$BK/my-own-notes/keep.txt"
+          printf 'stray\n' > "$BK/readme.txt"
+
+          # 触发一次释放（把戳改回旧值即可）→ 顺带触发清理
+          printf '1.2.0' > "$T/.version"
+          "$LYCO" new demo2 c > "$OUT/log2" 2>&1
+          cat "$OUT/log2"
+
+          # ③ 默认保留 10 份：12 假 + 1 真 = 13 → 删最旧的 3 份（created 01/02/03）。
+          #    最要紧的是**别把最新的删掉** —— 排序反了就会删掉刚备份出来的那份。
+          test -d "$BK/$REAL" || { echo "❌ 最新的那份备份被删了（排序反了？）"; exit 1; }
+          test -d "$BK/1.0.12-aaaaaaaaaaaaaa12" || { echo "❌ 第二新的备份被删了"; exit 1; }
+          test -d "$BK/1.0.04-aaaaaaaaaaaaaa04" || { echo "❌ 保留了太旧的备份（应该只留 10 份）"; exit 1; }
+          for i in 01 02 03; do
+            if [ -e "$BK/1.0.$i-aaaaaaaaaaaaaa$i" ]; then
+              echo "❌ 最旧的 1.0.$i 没被清理（保留数没生效？）"; exit 1
+            fi
+          done
+          grep -q '已清理 3 份' "$OUT/log2" || { echo "❌ 清理了却没告诉用户"; exit 1; }
+          grep -q 'LYCO_BACKUP_KEEP=0' "$OUT/log2" || { echo "❌ 没说怎么关掉自动清理"; exit 1; }
+
+          # ④ 只动自己的东西：用户在 backup/ 里放的东西必须原封不动。
+          #    只靠名字区分不了（my-own-notes 也是合法的 sanitize 结果），
+          #    真正的判据是「有没有我们写的 .meta」。
+          test -f "$BK/my-own-notes/keep.txt" || { echo "❌ 删了用户在 backup/ 里自己放的东西"; exit 1; }
+          test -f "$BK/readme.txt" || { echo "❌ 删了 backup/ 里的散落文件"; exit 1; }
+
+          # ⑤ LYCO_BACKUP_KEEP=0 → 全部保留（逃生通道）
+          before_n="$(ls -A "$BK" | wc -l | tr -d ' ')"
+          printf '1.2.0' > "$T/.version"
+          LYCO_BACKUP_KEEP=0 "$LYCO" new demo3 c > "$OUT/log3" 2>&1
+          after_n="$(ls -A "$BK" | wc -l | tr -d ' ')"
+          test "$after_n" -eq "$before_n" \
+            || { echo "❌ LYCO_BACKUP_KEEP=0 时仍被清理: $before_n -> $after_n"; exit 1; }
+          if grep -q '已清理' "$OUT/log3"; then echo "❌ 关掉了清理却仍报告清理"; exit 1; fi
+
+          # ⑥ reset 不该剪掉安全网：备份可能是用户唯一的恢复副本
+          "$LYCO" reset > "$OUT/log4" 2>&1
+          test -d "$BK" || { echo "❌ lyco reset 把模板备份一起删了（那是唯一的恢复副本）"; exit 1; }
+          test -f "$BK/$REAL/.meta" || { echo "❌ reset 后备份内容不完整"; exit 1; }
+          grep -q '模板备份已保留' "$OUT/log4" || { echo "❌ reset 没说备份被保留了"; exit 1; }
+          if [ -f "$T/main.c" ]; then echo "❌ reset 没有清掉模板"; exit 1; fi
+
+          echo "✅ 备份有保留上限、可关闭、只动自己的东西，且 reset 不剪安全网"

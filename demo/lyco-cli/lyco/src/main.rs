@@ -14,7 +14,18 @@ fn data_dir() -> PathBuf {
 fn templates_dir() -> PathBuf { data_dir().join("templates") }
 fn commands_dir() -> PathBuf { data_dir().join("commands") }
 fn web_dir()      -> PathBuf { data_dir().join("web") }
+fn backup_root()  -> PathBuf { data_dir().join("backup") }
 fn db_path()      -> PathBuf { data_dir().join("lyco.db") }
+
+/// 备份保留份数。默认 10 —— 一份备份就是那 15 个模板文件（几十 KB），
+/// 留着比删掉便宜得多；设 `LYCO_BACKUP_KEEP=0` 表示**永不自动清理**。
+/// 值不合法时退回默认（不报错 —— 一个环境变量的笔误不该让命令失败）。
+fn backup_keep() -> usize {
+    env::var("LYCO_BACKUP_KEEP")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(10)
+}
 
 /// 去掉 Windows `canonicalize()` 返回的 `\\?\` verbatim 前缀。
 ///
@@ -204,6 +215,8 @@ struct ReleaseReport {
     backup_dir: Option<PathBuf>,
     /// 是否走了「无从判断 → 按老行为覆盖」那条路
     forced: bool,
+    /// 因为超过保留份数而被清理掉的**更早**的备份（目录名）
+    pruned: Vec<String>,
 }
 
 /// 把版本戳变成安全的目录名。
@@ -252,7 +265,8 @@ fn sanitize_stamp(s: &str) -> String {
 /// （现在是任何一次模板改动）都会把定制**无声**抹掉。
 ///
 /// `old_stamp` 只用来给备份目录命名（= 用户升级前的那一版），取不到时用 `unknown`。
-fn release_templates(old_stamp: &str) -> std::io::Result<ReleaseReport> {
+/// `new_stamp` 写进备份目录的自述文件，让用户知道「这份备份是被哪一版替换掉的」。
+fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<ReleaseReport> {
     let dir = templates_dir();
     fs::create_dir_all(&dir)?;
     let web = web_dir();
@@ -327,7 +341,110 @@ fn release_templates(old_stamp: &str) -> std::io::Result<ReleaseReport> {
         manifest.push_str(&format!("{}\t{rel}\n", hash_str(content)));
     }
     let _ = fs::write(manifest_path(), manifest);
+
+    // 给这次备份写一份自述。两个用处：
+    // 1. 用户打开目录就能看懂「这是哪一版留下的、被哪一版换掉的」；
+    // 2. 清理时能**可靠排序** —— 目录名里的内容指纹是随机序（`1.2.0-aa87…`），
+    //    按名字排会删错。
+    if let Some(b) = &rep.backup_dir {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = fs::write(
+            b.join(".meta"),
+            format!(
+                "created={now}\nreplaced_by={new_stamp}\nlyco={}\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+    }
+    // 清理更早的备份。`LYCO_BACKUP_KEEP=0` → 永不自动清理。
+    // 先算出来再赋值，避免「赋值目标与借用的字段在同一句里」这种需要
+    // 借用检查器细究的写法（本机不编译，不给自己留疑问）。
+    let pruned = prune_backups(backup_keep(), rep.backup_dir.as_deref());
+    rep.pruned = pruned;
     Ok(rep)
+}
+
+/// 备份目录的排序键（越大越新）。
+///
+/// 优先读自述文件里的 `created=`；读不到（本次改动之前创建的备份、或自述写失败）
+/// 就退回**目录 mtime** —— 备份写完之后我们不再动它，所以 mtime 就是创建时刻。
+fn backup_sort_key(dir: &Path) -> u64 {
+    if let Ok(t) = fs::read_to_string(dir.join(".meta")) {
+        for line in t.lines() {
+            if let Some(v) = line.strip_prefix("created=") {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    return n;
+                }
+            }
+        }
+    }
+    fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 只保留最新的 `keep` 份备份，返回被清理掉的目录名。`keep == 0` 表示全部保留。
+///
+/// **只动我们自己的东西**，三道闸门缺一不可（外加一条 `protect`）：
+/// * 只处理 `backup/` 的**直接子目录**（不递归、不碰散落的文件）；
+/// * 名字必须满足 `sanitize_stamp(name) == name` —— `sanitize_stamp` 的值域
+///   正好是它的不动点集合，所以这条判据精确等于「这个名字可能是我们创建的」，
+///   天然挡掉 `..evil`、带空格/中文的名字；
+/// * 目录里必须有我们写的 `.meta`。**这一条才是真正区分「我们的备份」与
+///   「用户在 backup/ 里自己放的东西」的判据** —— 只靠名字区分不了
+///   （`my-own-notes` 也是合法的 sanitize 结果）。所以没有 `.meta` 的目录一律不碰。
+/// * `protect` 指定的目录（本次刚写的那份）永不删除。
+fn prune_backups(keep: usize, protect: Option<&Path>) -> Vec<String> {
+    if keep == 0 {
+        return Vec::new();
+    }
+    let root = backup_root();
+    let rd = match fs::read_dir(&root) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut dirs: Vec<(u64, PathBuf)> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = match p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue, // 非 UTF-8 名字：不认领，也就不动它
+        };
+        if sanitize_stamp(&name) != name {
+            continue; // 不是我们会创建的名字 → 是用户自己的东西，别碰
+        }
+        if !p.join(".meta").is_file() {
+            continue; // 没有我们的自述文件 → 不是我们的备份，别碰
+        }
+        if protect == Some(p.as_path()) {
+            continue; // 本次刚写的那份，永不删
+        }
+        dirs.push((backup_sort_key(&p), p));
+    }
+    if dirs.len() <= keep {
+        return Vec::new();
+    }
+    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新的在前
+    let mut removed = Vec::new();
+    for (_, p) in dirs.into_iter().skip(keep) {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if fs::remove_dir_all(&p).is_ok() {
+            removed.push(name);
+        }
+    }
+    removed
 }
 
 /// FNV-1a 64 位。自己实现而不引依赖：只要输入相同、结果永远相同
@@ -372,7 +489,7 @@ fn ensure_initialized() {
     if !templates_dir().exists() || stale {
         // 注意：必须在 release_templates 之前取 —— 它自己会 create_dir_all
         let first = !templates_dir().exists();
-        let rep = match release_templates(old_stamp.trim()) {
+        let rep = match release_templates(old_stamp.trim(), &want) {
             Ok(r) => r,
             Err(e) => {
                 // 释放失败不该让整个命令挂掉：模板读不到时
@@ -406,6 +523,17 @@ fn ensure_initialized() {
                 "   ❌ 以下文件**备份失败**, 覆盖前的原内容已丢失: {}",
                 rep.backup_failed.join(", ")
             );
+        }
+        if !rep.pruned.is_empty() {
+            // 清理掉的要说出来，并给出"我不想让它清"的开关 —— 自动删用户的东西
+            // 必须可见、可关。
+            println!(
+                "   🧹 备份只保留最近 {} 份, 已清理 {} 份更早的: {}",
+                backup_keep(),
+                rep.pruned.len(),
+                rep.pruned.join(", ")
+            );
+            println!("      (要全部保留: 设 LYCO_BACKUP_KEEP=0)");
         }
         let _ = fs::create_dir_all(templates_dir());
         let _ = fs::write(&stamp, &want);
@@ -726,8 +854,44 @@ fn cmd_web() {
 }
 
 fn cmd_reset() {
-    if data_dir().exists() { let _ = fs::remove_dir_all(data_dir()); }
-    println!("✅ 已重置 ~/.lyco/");
+    let d = data_dir();
+    if !d.exists() {
+        println!("✅ 已重置 ~/.lyco/");
+        return;
+    }
+    // `backup/` 是**覆盖前留下的恢复副本** —— 可能是用户唯一能找回定制的地方。
+    // `reset` 的语义是「把模板/配置恢复成默认」，不该顺手把安全网也剪了，
+    // 而且它原来是 `let _ = remove_dir_all(...)`：删失败也不吭声。
+    let bk = backup_root();
+    let kept_backups = fs::read_dir(&bk)
+        .map(|r| r.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count())
+        .unwrap_or(0);
+
+    let mut failed = Vec::new();
+    if let Ok(rd) = fs::read_dir(&d) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p == bk {
+                continue;
+            }
+            // 目录用 remove_dir_all，文件用 remove_file —— 两者都会在类型不匹配时失败，
+            // 所以「两个都失败」才算真失败。
+            if fs::remove_dir_all(&p).is_err() && fs::remove_file(&p).is_err() {
+                failed.push(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+            }
+        }
+    }
+    if failed.is_empty() {
+        println!("✅ 已重置 ~/.lyco/");
+    } else {
+        println!("⚠  已重置 ~/.lyco/, 但以下内容删不掉 (可能被占用): {}", failed.join(", "));
+    }
+    if kept_backups > 0 {
+        println!(
+            "   💾 {kept_backups} 份模板备份已保留在 {} (要一并删除请手动删)",
+            bk.display()
+        );
+    }
 }
 
 fn cmd_info() {
@@ -819,7 +983,7 @@ fn print_help() {
   install / uninstall [name]    构建并安装到 ~/.lyco/bin / 卸载
   clean                         清除构建产物
   web                           可视化 Web UI (纯静态预览页, 需 python3/python)
-  reset                         重置 ~/.lyco/
+  reset                         重置 ~/.lyco/ (模板备份会保留, 见下)
   info / list                   配置信息(含当前项目) / 已注册项目 + 命令列表
 
 平台 (--target): windows / mingw / linux / macos / android / ios / wasm
@@ -837,6 +1001,7 @@ Lyco.toml (与 Cargo.toml 同风格):
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
 模板: 编辑 ~/.lyco/templates/ 定制 (升级时只覆盖你没改过的, 改动会被保留)
+备份: 被覆盖掉的原内容存在 ~/.lyco/backup/ (只保留最近 10 份; 全部保留设 LYCO_BACKUP_KEEP=0)
 "#),
         if cfg!(windows) { "dll" } else { "so" },
         if cfg!(windows) { ".exe" } else { "" }

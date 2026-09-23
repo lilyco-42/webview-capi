@@ -554,7 +554,9 @@ pub fn check() -> Result<(), String> {
 
 // ── test: tests/*.c → 每个文件一个测试 target 并逐个运行 ────
 pub fn test() -> Result<(), String> {
-    let m = Manifest::load()?;
+    // 这里不用先 `Manifest::load()?` —— 紧接着的 `build()` 自己就会加载清单，
+    // 失败时给出的是同一个错误。（原来那行是 `let m = Manifest::load()?;`，
+    // 而那个 `m` 从头到尾没被用过。）
     build(false, None)?; // gen_xmake_lua 会为 tests/ 生成 test_* target
 
     let rd = fs::read_dir("tests").map_err(|_| "没有 tests/ 目录 (放 tests/xxx.c 后重试)".to_string())?;

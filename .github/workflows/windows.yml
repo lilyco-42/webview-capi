@@ -113,6 +113,43 @@ jobs:
           cargo run --release --locked -- list
           cargo run --release --locked -- info
 
+      # 死代码防线：`lyco` 这个 crate 必须保持 0 告警。
+      #
+      # 为什么值得单独一条：它长期挂着 9 个 never-used 告警
+      # （4 个死函数 + 1 个死字段 + 冗余变量 + 无用的 mut + 2 个死模块函数），
+      # 而这类告警背后藏着真 bug —— 比如 `list_projects` 从没被调用，
+      # 意味着 `lyco new` 一直在往一张没人读的表里写数据；`init()` 里的
+      # `.expect()` 还让「新建项目」因为一个用不到的数据库打不开而 panic。
+      # 告警是唯一的信号，一旦被淹没就没人看了。
+      #
+      # 两个刻意的取舍：
+      #   * 只断言**具体这几类**告警，不用 `-Dwarnings` —— CI 用的是浮动的
+      #     `dtolnay/rust-toolchain@stable`，`-Dwarnings` 会因为 rustc 将来
+      #     新增的任意 lint 把 CI 弄红，而这几类是稳定的老 lint。
+      #   * 必须先 `cargo clean -p lyco --release`：否则构建命中缓存、
+      #     根本不重编，断言就成了永远为真的废话。
+      - name: lyco 保持 0 告警（死代码防线）
+        shell: pwsh
+        run: |
+          # 这一步要**故意捕获** cargo 打到 stderr 的告警，所以先关掉
+          # 会把 stderr 升级成终止错误的开关（见下面「依赖写法」那一步的说明）。
+          $ErrorActionPreference = 'Continue'
+
+          cargo clean -p lyco --release
+          $log = (cargo build --release --locked 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "构建失败:`n$log" }
+
+          $pats = @('is never used', 'is never read',
+                    'unused variable', 'unused import', 'does not need to be mutable')
+          $hit = @()
+          foreach ($p in $pats) {
+            if ($log -match [regex]::Escape($p)) { $hit += $p }
+          }
+          if ($hit.Count -gt 0) {
+            throw ("出现死代码/未使用告警: " + ($hit -join ', ') + "`n$log")
+          }
+          '无死代码告警 ✓'
+
       # 依赖写法（`{ path }` / `{ git }` / 校验分支）的回归防线。
       #
       # 只断言**生成物**：`lyco build` 是「先写 xmake.lua、再调 xmake」，所以

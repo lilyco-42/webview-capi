@@ -2,12 +2,13 @@
 name = "lyco"
 version = "1.2.0"
 edition = "2024"
-description = "cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake + WASM 插件架构)"
+description = "cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)"
 license = "MIT"
 repository = "https://github.com/lilyco-42/webview-capi"
 
 [dependencies]
-tera = "1"
+# 原来还有 tera = "1"，但 `mod tmpl`（唯一用它的地方）两个函数从未被调用过 ——
+# 模板实际走 `subst()` 直接替换 `{K}`。删了。
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 once_cell = "1"

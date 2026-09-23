@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,10 +16,42 @@ fn commands_dir() -> PathBuf { data_dir().join("commands") }
 fn web_dir()      -> PathBuf { data_dir().join("web") }
 fn db_path()      -> PathBuf { data_dir().join("lyco.db") }
 
+/// 去掉 Windows `canonicalize()` 返回的 `\\?\` verbatim 前缀。
+///
+/// 不去掉的话，`lyco new` 会把 `\\?\C:\Users\…\demo` 原样写进注册表，
+/// `lyco list` 再把它打出来 —— 满屏反斜杠加问号。
+/// （UNC 的形式是 `\\?\UNC\server\share`，要还原成 `\\server\share`。）
+fn tidy_path(p: &Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s
+    }
+}
+
 // ── Lyco.toml (cargo 风格清单) ───────────────────────────────
 mod manifest;
 
-// ── 数据库 ───────────────────────────────────────────────────
+// ── 数据库（项目注册表） ──────────────────────────────────────
+// 只留 `projects` 一张表 —— 它是**唯一**有代码真的在用的表：
+// `lyco new` 写（add_project）、`lyco list` 读（list_projects）。
+//
+// 这次清掉的死东西（都是「看着正常其实没生效」）：
+//   * `builds` / `plugins` / `config` 三张表：全仓没有任何一行代码读或写它们。
+//     `plugins` 尤其明显 —— 插件信息本来就是扫 `commands/` 目录拿到的，
+//     那张表永远不会有数据。`config` 只被下面那两个函数服务，而那两个函数
+//     也从没被调用过。
+//   * `get_config` / `set_config`：从未被调用。没有命令、没有文档、也没有
+//     任何已定义的配置键，为它新造一个 `lyco config` 命令属于凭空加功能，
+//     所以选择删掉而不是补完（与 `list_projects` 的处理不同 —— 那个已经有
+//     `lyco list` 这个天然归宿）。
+//   * `url` / `targets` 两列：`targets` 存的就是 `[lang]`（见 cmd_new 的调用），
+//     和 `lang` 完全重复；`url` 写了但没人读。现在表的每一列都既写又读。
+//   * `last_open` 列：从来没有任何代码写过它，而原来的
+//     `ORDER BY last_open DESC` 于是对所有行都是 NULL、排序等于没排。
 mod db {
     use super::*;
     use rusqlite::Connection;
@@ -33,112 +64,84 @@ mod db {
         DB.lock().unwrap()
     }
 
+    /// 打开数据库并建表。**失败不 panic**。
+    ///
+    /// 原来这里是 `.expect("数据库打开失败")` / `.expect("数据库初始化失败")` ——
+    /// 也就是说 `lyco new` 会因为「一个用来记项目名的附带数据库打不开」
+    /// 而整条命令 panic。注册表只是便利功能，不该有这种杀伤力。
     pub fn init() {
         let mut db = get();
         if db.is_none() {
             let _ = fs::create_dir_all(data_dir());
-            let conn = Connection::open(db_path()).expect("数据库打开失败");
-            conn.execute_batch("
-                CREATE TABLE IF NOT EXISTS projects (
+            let conn = match Connection::open(db_path()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("⚠  项目注册表不可用 ({e}); 不影响构建与新建项目");
+                    return;
+                }
+            };
+            if let Err(e) = conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS projects (
                     name TEXT PRIMARY KEY,
                     lang TEXT NOT NULL,
-                    url TEXT,
                     path TEXT NOT NULL,
-                    targets TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_open DATETIME
-                );
-                CREATE TABLE IF NOT EXISTS builds (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_name TEXT,
-                    target TEXT,
-                    status TEXT DEFAULT 'pending',
-                    log TEXT,
-                    duration_ms INTEGER,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS plugins (
-                    name TEXT PRIMARY KEY,
-                    version TEXT,
-                    path TEXT,
-                    enabled INTEGER DEFAULT 1,
-                    description TEXT
-                );
-                CREATE TABLE IF NOT EXISTS config (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                );
-            ").expect("数据库初始化失败");
+                );",
+            ) {
+                eprintln!("⚠  项目注册表建表失败 ({e}); 不影响构建与新建项目");
+                return;
+            }
             *db = Some(conn);
         }
     }
 
-    pub fn add_project(name: &str, lang: &str, url: &str, path: &str, targets: &[String]) {
+    pub fn add_project(name: &str, lang: &str, path: &str) {
         init();
         let db = get();
-        let conn = db.as_ref().unwrap();
+        let Some(conn) = db.as_ref() else { return }; // 注册表不可用就静默跳过
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO projects (name, lang, url, path, targets) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![name, lang, url, path, targets.join(",")],
+            "INSERT OR REPLACE INTO projects (name, lang, path) VALUES (?1, ?2, ?3)",
+            rusqlite::params![name, lang, path],
         );
     }
 
+    /// 返回 `(名字, 语言, 路径, 创建时间)`，新的在前。
     pub fn list_projects() -> Vec<(String, String, String, String)> {
+        // 没建过库就说明一个项目都没登记过 —— 别为了「列个表」这种只读操作
+        // 顺手把 ~/.lyco/lyco.db 创建出来。
+        if !db_path().exists() {
+            return vec![];
+        }
         init();
         let db = get();
-        let conn = db.as_ref().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT name, lang, path, created_at FROM projects ORDER BY last_open DESC"
-        ).unwrap_or_else(|_| conn.prepare("SELECT name, lang, path, created_at FROM projects").unwrap());
+        let Some(conn) = db.as_ref() else { return vec![] };
+        // 只 SELECT 新旧 schema 都有的列，免得遇到老库直接失败
+        let Ok(mut stmt) =
+            conn.prepare("SELECT name, lang, path, created_at FROM projects ORDER BY created_at DESC")
+        else {
+            return vec![];
+        };
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         });
         match rows {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
             Err(_) => vec![],
         }
     }
-
-    pub fn get_config(key: &str) -> Option<String> {
-        init();
-        let db = get();
-        let conn = db.as_ref().unwrap();
-        conn.query_row("SELECT value FROM config WHERE key = ?", [key], |row| row.get(0)).ok()
-    }
-
-    pub fn set_config(key: &str, value: &str) {
-        init();
-        let db = get();
-        let conn = db.as_ref().unwrap();
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-            [key, value],
-        );
-    }
-}
-
-// ── 模板引擎 (Tera) ──────────────────────────────────────────
-mod tmpl {
-    use super::*;
-    use tera::{Tera, Context, Result};
-
-    pub fn render(template_str: &str, vars: &HashMap<&str, &str>) -> Result<String> {
-        let mut tera = Tera::default();
-        let mut ctx = Context::new();
-        for (k, v) in vars { ctx.insert(&**k, *v); }
-        tera.render_str(template_str, &ctx)
-    }
-
-    pub fn render_file(path: &Path, vars: &HashMap<&str, &str>) -> Result<String> {
-        let mut tera = Tera::new(&format!("{}", path.display())).unwrap_or_default();
-        let mut ctx = Context::new();
-        for (k, v) in vars { ctx.insert(&**k, *v); }
-        let name = path.file_name().unwrap().to_str().unwrap();
-        tera.render(name, &ctx)
-    }
 }
 
 // ── 内置模板 ─────────────────────────────────────────────────
+// 模板渲染不用模板引擎：`subst()` 直接替换 `{K}` 占位符就够了。
+// 这里原来还有一个 `mod tmpl`（Tera 封装），但两个函数从未被调用过 ——
+// 而且 `subst()` 的注释里已经写明「Tera 会把 {K} 当纯文本, 故直接替换」，
+// 也就是说 Tera 是被**主动换掉**的，那个模块是换完之后没删干净的残留。
+// 连同 `tera` 依赖一起删了（删完 `cargo build` 的警告从 9 个降到 0 个）。
 static TEMPLATE_MAIN_C: &str = include_str!("../templates/main.c");
 static TEMPLATE_XMAKE: &str = include_str!("../templates/xmake.lua");
 static TEMPLATE_HTML: &str = include_str!("../templates/index.html");
@@ -286,7 +289,10 @@ fn cmd_new(name: &str, url: &str, lang: &str) {
     write_file(&format!("{name}/.gitignore"), &read(".gitignore", TEMPLATE_GITIGNORE));
 
     // 持久化到数据库
-    db::add_project(name, lang, url, &std::fs::canonicalize(name).unwrap_or_default().to_string_lossy(), &[lang.to_string()]);
+    // 登记到项目注册表（`lyco list` 会读它）。只记 name/lang/路径 ——
+    // 原来的 url / targets 两列没人读，targets 还和 lang 完全重复。
+    let abs = std::fs::canonicalize(name).unwrap_or_default();
+    db::add_project(name, lang, &tidy_path(&abs));
 
     println!("✅ 已创建 {name} ({lang})");
     println!("  cd {name} && lyco run");
@@ -460,19 +466,53 @@ fn cmd_info() {
     if d.exists() {
         let t = fs::read_dir(templates_dir()).map(|r| r.count()).unwrap_or(0);
         let c = fs::read_dir(commands_dir()).map(|r| r.count()).unwrap_or(0);
-        println!("  模板: {t} 文件 | 外部命令: {c} 文件");
+        let n = db::list_projects().len();
+        println!("  模板: {t} 文件 | 外部命令: {c} 文件 | 已注册项目: {n} 个");
+    }
+    // 当前目录有清单时，把项目本身也报出来。
+    // `Lyco.toml` 的 `version` 字段原来解析了却从来没被读过
+    // （编译警告 `field \`version\` is never read`），这里让它真的派上用场。
+    if Path::new(manifest::MANIFEST).exists() {
+        match manifest::Manifest::load() {
+            Ok(m) => {
+                let ver = m.package.version.as_deref().unwrap_or("(未写)");
+                println!(
+                    "📦 当前项目: {} v{} | 依赖 {} 个",
+                    m.project_name(),
+                    ver,
+                    m.dependencies.len()
+                );
+            }
+            Err(e) => println!("⚠  {} 解析失败: {e}", manifest::MANIFEST),
+        }
     }
 }
 
 fn cmd_list() {
+    // 已注册项目（`lyco new` 登记、存在 ~/.lyco/lyco.db）。
+    // 这是 `list_projects()` 的**唯一**调用点 —— 在此之前那个函数从没被
+    // 调用过，于是 `lyco new` 一直在往一张没人读的表里写数据。
+    let projects = db::list_projects();
+    if !projects.is_empty() {
+        println!("已注册项目 ({}):", projects.len());
+        for (name, lang, path, created) in &projects {
+            // created_at 是 SQLite 的 "YYYY-MM-DD HH:MM:SS"，只取日期那段
+            let day = created.split([' ', 'T']).next().unwrap_or("");
+            // 显示时也过一遍 tidy_path：老库里可能存着带 `\\?\` 前缀的路径
+            println!("  {name:<16} {lang:<10} {day}  {}", tidy_path(Path::new(path)));
+        }
+        println!();
+    }
+
     println!("内置命令: new init add remove build check run test doc search update install uninstall clean web reset info list bench publish");
     let dir = commands_dir();
-    if dir.exists() {
+    if let Ok(rd) = fs::read_dir(dir) {
         let ext = if cfg!(windows) { "dll" } else { "so" };
-        for e in fs::read_dir(dir).unwrap() {
-            let p = e.unwrap().path();
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
             if p.extension().map(|x| x == ext).unwrap_or(false) {
-                println!("  外部: {} ({})", p.file_stem().unwrap().to_string_lossy(), p.display());
+                let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                println!("  外部: {stem} ({})", p.display());
             }
         }
     }
@@ -499,7 +539,7 @@ fn print_help() {
   clean                         清除构建产物
   web                           可视化 Web UI
   reset                         重置 ~/.lyco/
-  info / list                   配置信息 / 列出命令
+  info / list                   配置信息(含当前项目) / 已注册项目 + 命令列表
 
 平台 (--target): windows / mingw / linux / macos / android / ios / wasm
 
@@ -514,10 +554,11 @@ Lyco.toml (与 Cargo.toml 同风格):
   mypkg = {{ git = "https://…/repo.git" }} # 从 git 包仓库取 (也可 path = "../repo")
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
-插件: 将 .{} 放入 ~/.lyco/commands/ 扩展
+插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
 模板: 编辑 ~/.lyco/templates/ 定制 (随 lyco 升级自动更新, 升级前请备份)
 "#,
-        if cfg!(windows) { "dll" } else { "so" }
+        if cfg!(windows) { "dll" } else { "so" },
+        if cfg!(windows) { ".exe" } else { "" }
     );
 }
 
@@ -584,13 +625,32 @@ fn main() {
 
     // 优先外部命令
     if let Some(p) = find_external_cmd(cmd) {
-        let ext = if cfg!(windows) { "exe" } else { "" };
-        let exe = if cfg!(windows) { p.with_extension("exe") } else { p.clone() };
+        // `find_external_cmd` 返回的是 `commands/<名字>.dll`(Windows) /
+        // `<名字>.so`(其他平台) —— 那是**插件本体**，不是能执行的东西。
+        // 真正要跑的是同名的可执行文件：Windows 上是 `<名字>.exe`，
+        // 其他平台就是去掉扩展名后的 `<名字>`。
+        //
+        // 原来非 Windows 分支直接拿 `.so` 的路径去 `Command::new` ——
+        // 共享库没有 PT_INTERP，execve 必然失败（ENOEXEC），
+        // 也就是**插件在 Linux/macOS 上永远跑不起来**，而报错信息只说
+        // 「缺少同名可执行文件」，完全指不到原因。
+        let exe = if cfg!(windows) {
+            p.with_extension("exe")
+        } else {
+            p.with_extension("")
+        };
         if exe.exists() {
             let status = Command::new(&exe).args(cmd_args).status().unwrap();
             std::process::exit(status.code().unwrap_or(0));
         } else {
-            eprintln!("找到插件 {}, 但缺少同名可执行文件", p.display());
+            // 报完就退出，别再落到下面的 match 里 —— 否则还会把 38 行帮助
+            // 当成「未知命令」打出来，而这条命令其实是**已知的、只是装坏了**。
+            eprintln!(
+                "找到插件 {}, 但缺少配套的可执行文件 {}",
+                p.display(),
+                exe.display()
+            );
+            std::process::exit(1);
         }
     }
 

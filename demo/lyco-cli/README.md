@@ -88,5 +88,10 @@ cargo build --release   # 产物 target/release/lyco.exe
 
 - `lyco web` — 可视化 Web UI
 - `lyco reset` — 重置 ~/.lyco/ (模板随 lyco 版本自动更新)
-- `lyco info` / `lyco list` — 配置信息 / 命令列表
-- 插件: 把 `xxx.dll` 放进 `~/.lyco/commands/`, `lyco xxx` 即可调用
+- `lyco info` / `lyco list` — 配置信息(含当前项目) / 已注册项目 + 命令列表
+- 插件: 在 `~/.lyco/commands/` 里放**两个**文件 ——
+  `xxx.dll`(Linux/macOS 上是 `xxx.so`) 作为标记，以及同名的可执行文件
+  `xxx.exe`(Linux/macOS 上是 `xxx`)。之后 `lyco xxx` 就会调用它。
+  > 注意：**只放 `.dll` 是不够的**。原文档只写了 `.dll`，照着做会得到
+  > 「找到插件 …但缺少配套的可执行文件」。`.dll` 本身从不被加载，
+  > 它只是「这里有个插件」的标记。

@@ -86,7 +86,8 @@ cargo build --release   # 产物 target/release/lyco.exe
 
 ## 其他命令
 
-- `lyco web` — 可视化 Web UI
+- `lyco web` — 可视化 Web UI（**UI 预览版**，需 `python3`/`python`；页面是纯静态演示，
+  按钮尚未接入后端，实际操作请用命令行）
 - `lyco reset` — 重置 ~/.lyco/ (模板随 lyco 版本自动更新)
 - `lyco info` / `lyco list` — 配置信息(含当前项目) / 已注册项目 + 命令列表
 - 插件: 在 `~/.lyco/commands/` 里放**两个**文件 ——

@@ -74,8 +74,25 @@ body {
 }
 .md-topbar .spacer { flex: 1; }
 
+/* ── UI 预览版提示条 ── */
+.md-preview-note {
+  padding: 10px 20px;
+  background: rgba(245,158,11,0.12);
+  border-bottom: 1px solid var(--md-sys-color-warning);
+  color: var(--md-sys-color-warning);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+.md-preview-note b { font-weight: 700; }
+.md-preview-note code {
+  background: rgba(255,255,255,0.10);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
 /* ── MD3 Navigation Rail ── */
-.md-layout { display: flex; flex: 1; height: calc(100vh - 56px); overflow: hidden; }
+.md-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .md-nav-rail {
   width: 72px;
   background: var(--md-sys-color-surface-container);
@@ -498,6 +515,12 @@ body {
     <div class="spacer"></div>
     <button class="md-btn" onclick="alert('自检窗口')">🔍 自检</button>
   </div>
+  <!-- 诚实提示：这个页面是纯静态 UI 演示，没有后端（`lyco web` 只起了个静态文件服务器）。
+       原来这里的按钮会谎报成功（创建/构建都打 ✅），与 AI 面板自己写的「演示响应」自相矛盾。 -->
+  <div class="md-preview-note">
+    🧪 <b>UI 预览版</b> —— 本页是界面演示，<b>尚未接入后端</b>：创建 / 构建 / 运行 / 自检等按钮都不会真正执行操作。
+    实际操作请用命令行：<code>lyco new</code> · <code>lyco build</code> · <code>lyco run</code> · <code>lyco check</code>
+  </div>
   <div class="md-layout">
     <!-- Nav Rail -->
     <nav class="md-nav-rail">
@@ -584,7 +607,7 @@ body {
       <div id="panel-projects" style="display:none" class="fade-in">
         <h2 style="margin-bottom:16px">📂 项目列表</h2>
         <div class="md-card">
-          <div class="md-card-title">最近项目</div>
+          <div class="md-card-title">最近项目 <span style="font-size:0.72rem;font-weight:400;color:var(--md-sys-color-warning)">（示例数据，未读取真实注册表）</span></div>
           <div id="projectList"></div>
         </div>
       </div>
@@ -625,7 +648,9 @@ body {
 <script>
 const LANGS=[{c:'c',n:'C',i:'C',d:'系统级'},{c:'python',n:'Python',i:'🐍',d:'快速开发'},{c:'typescript',n:'TypeScript',i:'TS',d:'类型安全'},{c:'rust',n:'Rust',i:'🦀',d:'高性能'},{c:'go',n:'Go',i:'Go',d:'简洁高效'},{c:'java',n:'Java',i:'☕',d:'跨平台'},{c:'zig',n:'Zig',i:'Z',d:'底层控制'},{c:'csharp',n:'C#',i:'#',d:'.NET'},{c:'e',n:'易语言',i:'易',d:'中文编程'}];
 const PLATFORMS=[{id:'windows',n:'Windows',i:'🪟'},{id:'macos',n:'macOS',i:'🍎'},{id:'linux',n:'Linux',i:'🐧'},{id:'android',n:'Android',i:'🤖'},{id:'wasm',n:'WASM',i:'🌐'}];
-const PROJECTS=[{name:'demo-app',lang:'c',url:'http://192.168.10.165:8765'},{name:'demo-py',lang:'python',url:'https://example.com'},{name:'demo-rs',lang:'rust',url:'https://example.com'}];
+// 示例数据（纯前端演示，不读 ~/.lyco/lyco.db）。
+// 注意：这份模板原本含一个开发机的内网地址，别再把私网 IP 写进来。
+const PROJECTS=[{name:'demo-app',lang:'c',url:'https://example.com'},{name:'demo-py',lang:'python',url:'https://example.com'},{name:'demo-rs',lang:'rust',url:'https://example.com'}];
 let step=1,selectedLang='',selectedTargets=['windows','android'];
 
 function renderLangs(){document.getElementById('langGrid').innerHTML=LANGS.map(l=>`<div class="md-lang-card ${l.c===selectedLang?'selected':''}" onclick="selectLang('${l.c}')"><div class="check">✓</div><div class="icon">${l.i}</div><div class="name">${l.n}</div><div class="desc">${l.d}</div></div>`).join('')}
@@ -647,12 +672,16 @@ function nextStep(s){step=s;
   updateSteps()
 }
 function checkCreate(){document.getElementById('btnCreate').disabled=!document.getElementById('projName').value.trim()}
-function createProj(){const n=document.getElementById('projName').value||'app';const bar=document.getElementById('progressBar');bar.style.width='30%';setTimeout(()=>{bar.style.width='70%';setTimeout(()=>{bar.style.width='100%';PROJECTS.unshift({name:n,lang:selectedLang,url:document.getElementById('projUrl').value});setTimeout(()=>{bar.style.width='0%';alert('✅ '+n+' 已创建!');showPanel('projects')},300)},400)},300)}
+// 纯前端演示：不会真的创建项目。原来这里弹的是「成功创建」的假提示，但什么都没建 ——
+// 谎报成功比报错更糟。改成把用户引到真正管用的命令行。
+function createProj(){const n=document.getElementById('projName').value||'app';const lang=selectedLang||'c';const bar=document.getElementById('progressBar');bar.style.width='30%';setTimeout(()=>{bar.style.width='70%';setTimeout(()=>{bar.style.width='100%';PROJECTS.unshift({name:n,lang:lang,url:document.getElementById('projUrl').value});setTimeout(()=>{bar.style.width='0%';alert('（UI 预览版）未真正创建项目。\n请用命令行:\n\n  lyco new '+n+' '+lang);showPanel('projects')},300)},400)},300)}
 function showPanel(p){document.querySelectorAll('[id^="panel-"]').forEach(el=>el.style.display='none');document.getElementById('panel-'+p).style.display='block';document.querySelectorAll('.md-nav-item').forEach(n=>n.classList.remove('active'));event.currentTarget.classList.add('active')}
-function build(){const l=document.getElementById('buildLog');l.textContent+='\n🔨 构建中...';setTimeout(()=>l.textContent+='\n✅ 完成!',1000)}
-function run(){document.getElementById('buildLog').textContent+='\n▶ 运行中...'}
+// 纯前端演示：不会真的构建/运行（原来打的是「构建完成」的假提示）。
+function build(){const l=document.getElementById('buildLog');l.textContent+='\n（UI 预览版）未真正构建。请用命令行: lyco build'}
+function run(){document.getElementById('buildLog').textContent+='\n（UI 预览版）未真正运行。请用命令行: lyco run'}
 function askAi(){const i=document.getElementById('aiInput');const b=document.getElementById('aiBox');b.innerHTML+=`<div style="background:var(--md-sys-color-primary);color:#fff;padding:8px 14px;border-radius:12px;font-size:0.82rem;margin-bottom:8px;margin-left:auto;max-width:85%">${i.value}</div>`;i.value='';setTimeout(()=>{b.innerHTML+=`<div style="background:var(--md-sys-color-surface-container);border:1px solid var(--md-sys-color-outline-variant);padding:8px 14px;border-radius:12px;font-size:0.82rem;margin-bottom:8px;margin-right:20%;max-width:85%">演示响应。配置 OpenAI Key 启用真实 AI。</div>`;b.scrollTop=b.scrollHeight},500)}
-function runCheck(){document.getElementById('checkList').innerHTML=[{s:'ok',n:'WebView2 Runtime',d:'v152 已安装'},{s:'ok',n:'Android SDK',d:'API 36'},{s:'ok',n:'Java JDK',d:'Temurin 21'},{s:'ok',n:'Python',d:'pywebview 可用'},{s:'warn',n:'Rust',d:'未检测'},{s:'err',n:'OpenAI Key',d:'未配置'}].map(c=>`<div class="md-checkbox"><input type="checkbox" checked disabled><span class="box"></span><span>${c.n}</span><span style="margin-left:auto;font-size:0.72rem;color:var(--md-sys-color-on-surface-variant)">${c.d}</span></div>`).join('')}
+// 纯前端演示：下面这些检测结果全是编的（原来直接列出来，看着像真检测过）。
+function runCheck(){document.getElementById('checkList').innerHTML='<div style="font-size:0.75rem;color:var(--md-sys-color-warning);margin-bottom:10px">（示例数据，未真实检测环境 —— 请用 <code>lyco check</code>）</div>'+[{s:'ok',n:'WebView2 Runtime',d:'v152 已安装'},{s:'ok',n:'Android SDK',d:'API 36'},{s:'ok',n:'Java JDK',d:'Temurin 21'},{s:'ok',n:'Python',d:'pywebview 可用'},{s:'warn',n:'Rust',d:'未检测'},{s:'err',n:'OpenAI Key',d:'未配置'}].map(c=>`<div class="md-checkbox"><input type="checkbox" checked disabled><span class="box"></span><span>${c.n}</span><span style="margin-left:auto;font-size:0.72rem;color:var(--md-sys-color-on-surface-variant)">${c.d}</span></div>`).join('')}
 
 function startApp(){document.getElementById('onboard').classList.add('hide');localStorage.setItem('lyco_seen','1')}
 function skipOnboard(){document.getElementById('onboard').classList.add('hide');localStorage.setItem('lyco_seen','1')}

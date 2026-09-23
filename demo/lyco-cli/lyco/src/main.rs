@@ -448,11 +448,76 @@ fn cmd_doc() {
     println!("✅ 文档输出: docs/api/html/index.html");
 }
 
+// ── 本地静态服务器（`lyco web`） ─────────────────────────────
+// 页面是纯静态文件，用 Python 自带的 http.server 托管。
+//
+// 原来硬编码 `Command::new("python")` 且用 `let _` 吞掉失败 —— 两个后果：
+//   1. 多数 Linux/macOS 上根本没有 `python`（只有 `python3`），
+//      于是 `lyco web` 在这些平台上**永远起不来**；
+//   2. 起不来也不报错，用户看到的却是「打开浏览器访问 http://localhost:8080」，
+//      打开发现连不上。属于**报喜不报忧**。
+
+/// 找一个真能用的 Python。顺序：`python3` → `python` → `py -3`（Windows 启动器）。
+///
+/// 探测用 `-c "print(1)"` 而不是 `--version`：Windows 上未安装 Python 时，
+/// `python` 往往是个「打开微软商店」的假 exe，`--version` 分辨不出来，
+/// 而它不会打印 `1`。
+fn find_python() -> Option<(&'static str, &'static [&'static str])> {
+    const CANDIDATES: &[(&str, &[&str])] = &[
+        ("python3", &[]),
+        ("python", &[]),
+        ("py", &["-3"]),
+    ];
+    for (exe, pre) in CANDIDATES {
+        let ok = Command::new(exe)
+            .args(*pre)
+            .args(["-c", "print(1)"])
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
+            .unwrap_or(false);
+        if ok {
+            return Some((exe, pre));
+        }
+    }
+    None
+}
+
+/// 起静态服务器托管 `~/.lyco/web/`（阻塞到服务退出）。返回是否真的起来了。
+fn serve_web(py: (&str, &[&str]), port: &str) -> bool {
+    let (exe, pre) = py;
+    let mut args: Vec<&str> = pre.to_vec();
+    args.push("-m");
+    args.push("http.server");
+    args.push(port);
+    Command::new(exe)
+        .args(&args)
+        .current_dir(web_dir())
+        .status()
+        .is_ok()
+}
+
+/// 找不到 Python 时的提示：说清「为什么」和「还能怎么办」，别只说失败。
+fn web_no_python_hint() -> String {
+    format!(
+        "❌ 未找到 python3 / python，无法启动本地服务器。\n   \
+         页面本身是纯静态文件，也可以用任意静态服务器托管这个目录:\n   {}",
+        web_dir().display()
+    )
+}
+
 fn cmd_web() {
     ensure_initialized();
     let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
+    // 先确认能起服务，再打印地址 —— 否则用户会去访问一个根本不存在的页面。
+    let Some(py) = find_python() else {
+        eprintln!("{}", web_no_python_hint());
+        std::process::exit(1);
+    };
     println!("🌐 http://localhost:{port}  (文件: {})", web_dir().display());
-    let _ = Command::new("python").args(["-m","http.server",&port]).current_dir(web_dir()).status();
+    if !serve_web(py, &port) {
+        eprintln!("{}", web_no_python_hint());
+        std::process::exit(1);
+    }
 }
 
 fn cmd_reset() {
@@ -519,7 +584,10 @@ fn cmd_list() {
 }
 
 fn print_help() {
-    print!(r#"lyco v1.2.0 - cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)
+    // 版本号从 Cargo.toml 取（`env!(CARGO_PKG_VERSION)`），别写死 ——
+    // 写死的版本号一定会过期，而且同一个文件里 `ensure_initialized` 的
+    // 模板版本戳本来就是这么取的，两处不一致迟早出事。
+    print!(concat!("lyco v", env!("CARGO_PKG_VERSION"), r#" - cargo 风格的跨平台 WebView 项目管理器 (Lyco.toml + xmake)
 
 用法: lyco <command> [args]        (b/c/r/t/d 为 build/check/run/test/doc 别名)
 
@@ -537,7 +605,7 @@ fn print_help() {
   update                        更新包仓库 (xmake repo -u)
   install / uninstall [name]    构建并安装到 ~/.lyco/bin / 卸载
   clean                         清除构建产物
-  web                           可视化 Web UI
+  web                           可视化 Web UI (纯静态预览页, 需 python3/python)
   reset                         重置 ~/.lyco/
   info / list                   配置信息(含当前项目) / 已注册项目 + 命令列表
 
@@ -556,7 +624,7 @@ Lyco.toml (与 Cargo.toml 同风格):
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
 模板: 编辑 ~/.lyco/templates/ 定制 (随 lyco 升级自动更新, 升级前请备份)
-"#,
+"#),
         if cfg!(windows) { "dll" } else { "so" },
         if cfg!(windows) { ".exe" } else { "" }
     );
@@ -570,6 +638,15 @@ fn main() {
         ensure_initialized();
         let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
         let url = format!("http://localhost:{port}");
+
+        // 先确认能起服务，再告诉用户"打开浏览器访问"并真的去开浏览器 ——
+        // 否则用户会被送去一个连不上的地址（原来就是这个行为：找不到 python
+        // 也照样打印地址、照样开浏览器）。
+        let Some(py) = find_python() else {
+            eprintln!("{}", web_no_python_hint());
+            std::process::exit(1);
+        };
+
         println!("🌐 Lyco WebView Studio 启动中...");
         println!("   打开浏览器访问: {url}");
         println!("   按 Ctrl+C 退出");
@@ -578,10 +655,12 @@ fn main() {
         let port_clone = port.clone();
         let web_dir_clone = web_dir();
         std::thread::spawn(move || {
-            let _ = Command::new("python")
-                .args(["-m", "http.server", &port_clone])
-                .current_dir(web_dir_clone)
-                .status();
+            let (exe, pre) = py;
+            let mut a: Vec<&str> = pre.to_vec();
+            a.push("-m");
+            a.push("http.server");
+            a.push(port_clone.as_str());
+            let _ = Command::new(exe).args(&a).current_dir(web_dir_clone).status();
         });
 
         // 等待服务启动

@@ -59,7 +59,9 @@ jobs:
         uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
-          package-cache: true
+          # 不要开 package-cache：它会执行 `xmake l utils.ci.packageskey` 算缓存键，
+          # 而该脚本需要配合 project-path 才能算出键，否则以退出码 4294967295(-1) 失败。
+          # 这只是可选优化，去掉最省事。
 
       - name: 构建 demo/c-main
         shell: pwsh

@@ -252,7 +252,8 @@ fn sanitize_stamp(s: &str) -> String {
 /// * 有清单、但内容不一致 → **用户改过 → 保留**，只把文件名报回去。
 ///
 /// 另外，**凡是要覆盖掉一份不同的内容，先把它备份**到
-/// `~/.lyco/backup/<旧版本戳>/`。这是兜底：迁移那一次和清单损坏自愈那一次，
+/// `~/.lyco/backup/<旧版本戳>/`（布局镜像 `~/.lyco/`，所以 `cp -r` 就能放回去；
+/// 也可以直接用 `lyco restore <版本戳>`）。这是兜底：迁移那一次和清单损坏自愈那一次，
 /// 我们**无从判断**哪些文件是用户的心血，备份至少让损失可恢复；
 /// 「存在但读不出来」（非 UTF-8）的文件也是靠这一层救回来的
 /// —— 否则它会被当成"不存在"直接覆盖掉。
@@ -272,11 +273,24 @@ fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<Releas
     let web = web_dir();
     fs::create_dir_all(&web)?;
 
-    let mut jobs: Vec<(String, &str, PathBuf)> = ALL_TEMPLATES
+    // `(清单键, 备份里的相对路径, 内容, 目标路径)`
+    //
+    // 备份路径**镜像 `~/.lyco/` 的结构**（`templates/…`、`web/…`）。以前是平铺的
+    // —— 模板文件直接躺在备份根目录下、网页却在 `web/` 子目录里，而这两者其实
+    // 属于 `~/.lyco/` 下**两个不同的根**。用户看到 `backup/1.2.0/main.c` 与
+    // `backup/1.2.0/web/index.html` 根本推不出各自该回到哪儿，所谓"备份"也就
+    // 只能靠人工试。镜像之后，恢复就是一次机械的目录拷贝（`lyco restore` 做的
+    // 就是这件事，但用户自己 `cp -r` 也能对）。
+    //
+    // 清单键**刻意保持原样**（还是 `main.c`，不是 `templates/main.c`）：改它会让
+    // 老用户已有的 `.manifest` 全部失配，那些文件会被判成"你改过"而永久保留，
+    // 模板更新从此静默失效。布局是给人看的，清单是给自己看的，两者不必一致。
+    let mut jobs: Vec<(String, String, &str, PathBuf)> = ALL_TEMPLATES
         .iter()
-        .map(|(n, c)| ((*n).to_string(), *c, dir.join(n)))
+        .map(|(n, c)| ((*n).to_string(), format!("templates/{n}"), *c, dir.join(n)))
         .collect();
     jobs.push((
+        "web/index.html".to_string(),
         "web/index.html".to_string(),
         TEMPLATE_WEB_HTML,
         web.join("index.html"),
@@ -296,7 +310,7 @@ fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<Releas
     let mut rep = ReleaseReport { forced: force, ..Default::default() };
     let mut manifest = String::new();
 
-    for (rel, content, dest) in jobs {
+    for (rel, backup_rel, content, dest) in jobs {
         let prev_hash = prev.iter().find(|(n, _)| *n == rel).map(|(_, h)| h.clone());
         let existed = dest.exists();
         let cur = fs::read_to_string(&dest).ok();
@@ -324,7 +338,7 @@ fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<Releas
                     rep.backup_dir =
                         Some(data_dir().join("backup").join(sanitize_stamp(old_stamp)));
                 }
-                rep.backup_dir.as_ref().unwrap().join(&rel)
+                rep.backup_dir.as_ref().unwrap().join(&backup_rel)
             };
             if let Some(p) = target.parent() {
                 let _ = fs::create_dir_all(p);
@@ -447,6 +461,213 @@ fn prune_backups(keep: usize, protect: Option<&Path>) -> Vec<String> {
     removed
 }
 
+/// 当前 Unix 秒。系统时钟早于 1970（取不到）时当 0。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 把时间差说成人话。只做粗粒度，够用户判断"这是不是刚才那次"就行。
+fn human_age(now: u64, then: u64) -> String {
+    let d = now.saturating_sub(then);
+    if d < 60 {
+        format!("{d} 秒前")
+    } else if d < 3600 {
+        format!("{} 分钟前", d / 60)
+    } else if d < 86_400 {
+        format!("{} 小时前", d / 3600)
+    } else {
+        format!("{} 天前", d / 86_400)
+    }
+}
+
+/// 读备份自述文件里的某个字段（`created=` / `replaced_by=` / `lyco=`）。
+/// 读不到就返回 `?` —— 展示用，不值得为它报错。
+fn meta_field(dir: &Path, key: &str) -> String {
+    fs::read_to_string(dir.join(".meta"))
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// 递归列出目录下的文件，返回 `(相对路径, 绝对路径)`，按相对路径排序。
+///
+/// 跳过以 `.` 开头的项 —— 我们自己的 `.meta` 就在备份根目录里，它不是模板；
+/// 模板名也都不以点开头（`ALL_TEMPLATES` 里没有）。
+/// 相对路径统一成正斜杠，方便打印、比较与写进断言。
+fn walk_files(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = match fs::read_dir(&d) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = match p.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if let Ok(r) = p.strip_prefix(root) {
+                out.push((r.to_string_lossy().replace('\\', "/"), p));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 备份里的相对路径 → 它该回到 `~/.lyco/` 下的哪个位置。
+///
+/// 新布局镜像 `~/.lyco/`（`templates/…` / `web/…`）；老布局是平铺的
+/// （模板文件直接躺在备份根目录下），所以**没有前缀**的按模板处理 ——
+/// 这样两种布局都能恢复，不用为老备份写迁移。
+fn backup_rel_to_dest(rel: &str) -> PathBuf {
+    if let Some(rest) = rel.strip_prefix("templates/") {
+        templates_dir().join(rest)
+    } else if let Some(rest) = rel.strip_prefix("web/") {
+        web_dir().join(rest)
+    } else {
+        templates_dir().join(rel)
+    }
+}
+
+/// `lyco restore` —— 不带参数列出可用备份；带名字则把那份备份放回去。
+///
+/// 刻意**不动 `.version` 与 `.manifest`**：恢复之后这些文件与清单不一致，
+/// 于是会被 `release_templates` 判定为「用户改过」而**保留** —— 这正是用户
+/// 要的结果（我就是要这一版）。若顺手把清单改成恢复后的内容，下一次释放会
+/// 立刻把它们覆盖掉，恢复等于白做。
+///
+/// 恢复会覆盖**当前**内容，所以先把当前内容存一份（`backup/pre-restore-<秒>/`）
+/// —— 不能让"恢复"本身变成一次新的丢失。
+fn cmd_restore(args: &[String]) {
+    let root = backup_root();
+    let mut dirs: Vec<(u64, PathBuf)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            // 与我们自己的备份判据一致：目录 + 有自述文件。
+            // 用户在 backup/ 里自己放的东西不会被列进来，也不会被碰。
+            if !p.is_dir() || !p.join(".meta").is_file() {
+                continue;
+            }
+            dirs.push((backup_sort_key(&p), p));
+        }
+    }
+    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新的在前
+
+    let Some(want) = args.first() else {
+        if dirs.is_empty() {
+            println!("没有备份 ({})", root.display());
+            return;
+        }
+        let now = now_secs();
+        println!("可用备份 (新 → 旧):");
+        for (t, p) in &dirs {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let cnt = walk_files(p).len();
+            let by = meta_field(p, "replaced_by");
+            println!(
+                "  {name:<40} {cnt:>3} 个文件  {}  被 {by} 替换",
+                human_age(now, *t)
+            );
+        }
+        println!("\n用法: lyco restore <名字>");
+        return;
+    };
+
+    let stamp = want.as_str();
+    // 名字来自**命令行** → 当不可信输入处理。要求它是 `sanitize_stamp` 的不动点
+    // （= 我们可能创建出来的名字），`../..` 这类会在这里被挡住。
+    if sanitize_stamp(stamp) != stamp {
+        eprintln!("❌ 备份名不合法: {stamp}");
+        eprintln!("   用 `lyco restore` 不带参数可以看到可用的名字");
+        std::process::exit(1);
+    }
+    let src = root.join(stamp);
+    if !src.is_dir() || !src.join(".meta").is_file() {
+        eprintln!("❌ 找不到备份 {stamp} ({})", src.display());
+        eprintln!("   用 `lyco restore` 不带参数可以看到可用的名字");
+        std::process::exit(1);
+    }
+    let files = walk_files(&src);
+    if files.is_empty() {
+        eprintln!("❌ 备份 {stamp} 里没有文件");
+        std::process::exit(1);
+    }
+
+    let pre = root.join(format!("pre-restore-{}", now_secs()));
+    let mut restored: Vec<String> = Vec::new();
+    let mut saved: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for (rel, from) in files {
+        let dest = backup_rel_to_dest(&rel);
+        if let Some(par) = dest.parent() {
+            let _ = fs::create_dir_all(par);
+        }
+        // 只有"当前内容与备份里那份不一样"才值得先存 —— 一样就没什么可丢的。
+        let differs = match (fs::read(&dest), fs::read(&from)) {
+            (Ok(a), Ok(b)) => a != b,
+            (Err(_), _) => false, // 现在没这个文件 → 覆盖不会丢东西
+            (Ok(_), Err(_)) => true,
+        };
+        if differs {
+            let keep = pre.join(&rel);
+            if let Some(par) = keep.parent() {
+                let _ = fs::create_dir_all(par);
+            }
+            if fs::copy(&dest, &keep).is_ok() {
+                saved.push(rel.clone());
+            }
+        }
+        match fs::copy(&from, &dest) {
+            Ok(_) => restored.push(rel),
+            Err(e) => failed.push(format!("{rel} ({e})")),
+        }
+    }
+    if !saved.is_empty() {
+        let _ = fs::write(
+            pre.join(".meta"),
+            format!(
+                "created={}\nreplaced_by=restore:{stamp}\nlyco={}\n",
+                now_secs(),
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
+    }
+    println!("♻️  已从备份 {stamp} 恢复 {} 个文件", restored.len());
+    for r in &restored {
+        println!("   {r}");
+    }
+    if !saved.is_empty() {
+        println!("   💾 恢复前的内容已先存到 {}", pre.display());
+    }
+    if !failed.is_empty() {
+        println!("   ❌ 以下文件恢复失败: {}", failed.join(", "));
+        std::process::exit(1);
+    }
+    println!("   注意: 没有改动 .version 与 .manifest —— 这些文件之后会被视为");
+    println!("   「你改过的」, 后续模板更新不会覆盖它们。");
+}
+
 /// FNV-1a 64 位。自己实现而不引依赖：只要输入相同、结果永远相同
 /// （std 的 `DefaultHasher` 不保证跨 Rust 版本稳定）。
 fn fnv1a(h: &mut u64, bytes: &[u8]) {
@@ -517,6 +738,11 @@ fn ensure_initialized() {
                 rep.backed_up.len(),
                 b.display()
             );
+            // 光说"备份到哪"不够 —— 得让用户知道**怎么拿回来**，
+            // 而且要能直接复制粘贴（所以打印目录名，不是全路径）。
+            if let Some(n) = b.file_name() {
+                println!("      (要恢复: lyco restore {})", n.to_string_lossy());
+            }
         }
         if !rep.backup_failed.is_empty() {
             println!(
@@ -946,7 +1172,7 @@ fn cmd_list() {
         println!();
     }
 
-    println!("内置命令: new init add remove build check run test doc search update install uninstall clean web reset info list bench publish");
+    println!("内置命令: new init add remove build check run test doc search update install uninstall clean web reset restore info list bench publish");
     let dir = commands_dir();
     if let Ok(rd) = fs::read_dir(dir) {
         let ext = if cfg!(windows) { "dll" } else { "so" };
@@ -984,6 +1210,7 @@ fn print_help() {
   clean                         清除构建产物
   web                           可视化 Web UI (纯静态预览页, 需 python3/python)
   reset                         重置 ~/.lyco/ (模板备份会保留, 见下)
+  restore [名字]                列出模板备份 / 把某一份放回去 (lyco restore)
   info / list                   配置信息(含当前项目) / 已注册项目 + 命令列表
 
 平台 (--target): windows / mingw / linux / macos / android / ios / wasm
@@ -1001,7 +1228,9 @@ Lyco.toml (与 Cargo.toml 同风格):
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
 插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
 模板: 编辑 ~/.lyco/templates/ 定制 (升级时只覆盖你没改过的, 改动会被保留)
-备份: 被覆盖掉的原内容存在 ~/.lyco/backup/ (只保留最近 10 份; 全部保留设 LYCO_BACKUP_KEEP=0)
+备份: 被覆盖掉的原内容存在 ~/.lyco/backup/<版本戳>/ (镜像 ~/.lyco/ 的结构,
+      所以 cp -r 也能放回去); lyco restore 列出可用备份, lyco restore <版本戳> 恢复。
+      只保留最近 10 份 (全部保留设 LYCO_BACKUP_KEEP=0)
 "#),
         if cfg!(windows) { "dll" } else { "so" },
         if cfg!(windows) { ".exe" } else { "" }
@@ -1148,6 +1377,7 @@ fn main() {
         "clean" => cmd_clean(),
         "web"   => cmd_web(),
         "reset" => cmd_reset(),
+        "restore" => cmd_restore(cmd_args),
         "info"  => cmd_info(),
         "list"  => cmd_list(),
         _ => { print_help(); std::process::exit(1); }

@@ -273,6 +273,8 @@ jobs:
 
           # ① 迁移：老用户只有旧式版本戳、没有清单 → 无从判断，会覆盖。
           #    覆盖掉的东西必须能找回，**含嵌套路径**（web/index.html）。
+          #    备份布局**镜像 ~/.lyco/**（templates/… 与 web/…）——
+          #    平铺布局下用户推不出文件该回到哪儿，restore 也就无从机械地放回去。
           printf '1.2.0' > "$T/.version"
           printf '/* OLD-MAIN-C 老用户的心血 */\n' > "$T/main.c"
           printf '<html>OLD-PAGE</html>' > "$HOME/.lyco/web/index.html"
@@ -280,7 +282,7 @@ jobs:
           cat "$OUT/log1"
           grep -q '已备份到' "$OUT/log1" || { echo "❌ 覆盖了却没说备份到哪"; exit 1; }
           printf '/* OLD-MAIN-C 老用户的心血 */\n' > "$OUT/exp1"
-          cmp -s "$OUT/exp1" "$BK/1.2.0/main.c" \
+          cmp -s "$OUT/exp1" "$BK/1.2.0/templates/main.c" \
             || { echo "❌ 老用户的 main.c 没被备份"; exit 1; }
           printf '<html>OLD-PAGE</html>' > "$OUT/exp2"
           cmp -s "$OUT/exp2" "$BK/1.2.0/web/index.html" \
@@ -298,9 +300,9 @@ jobs:
           before="$(wc -c < "$T/main.c" | tr -d ' ')"
           printf '1.2.0-0000000000000000' > "$T/.version"
           "$LYCO" new demo3 c > "$OUT/log3" 2>&1
-          test -f "$BK/1.2.0-0000000000000000/main.c" \
+          test -f "$BK/1.2.0-0000000000000000/templates/main.c" \
             || { echo "❌ 非 UTF-8 文件没被备份（原字节已丢）"; exit 1; }
-          after="$(wc -c < "$BK/1.2.0-0000000000000000/main.c" | tr -d ' ')"
+          after="$(wc -c < "$BK/1.2.0-0000000000000000/templates/main.c" | tr -d ' ')"
           test "$after" -eq "$before" \
             || { echo "❌ 备份字节数不对: $before -> $after"; exit 1; }
 
@@ -312,7 +314,7 @@ jobs:
           "$LYCO" new demo4 c > "$OUT/log4" 2>&1
           grep -q '注册表缺失或损坏' "$OUT/log4" || { echo "❌ 没说明为什么按默认覆盖"; exit 1; }
           printf '/* CUSTOM-X */\n' > "$OUT/exp4"
-          cmp -s "$OUT/exp4" "$BK/1.2.0-0000000000000000/main.c" \
+          cmp -s "$OUT/exp4" "$BK/1.2.0-0000000000000000/templates/main.c" \
             || { echo "❌ 清单损坏那次丢掉的定制没进备份"; exit 1; }
 
           # ⑤ 备份目录名来自**用户可写的文件**（.version），所以
@@ -409,3 +411,90 @@ jobs:
           if [ -f "$T/main.c" ]; then echo "❌ reset 没有清掉模板"; exit 1; fi
 
           echo "✅ 备份有保留上限、可关闭、只动自己的东西，且 reset 不剪安全网"
+      # 上一条保证「覆盖前会备份」，这一条保证「备份能真的放回去」——
+      # 只能看不能用的备份，仍然等于没有备份。
+      - name: 备份能真的放回去（lyco restore）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          OUT="$(mktemp -d)"
+          export HOME="$OUT/home"
+          T="$HOME/.lyco/templates"
+          W="$HOME/.lyco/web"
+          BK="$HOME/.lyco/backup"
+          mkdir -p "$T" "$W"
+          cd "$OUT"
+
+          # ① 造一份真实备份：老用户迁移（只有旧式版本戳、没有清单）→ 覆盖前会备份。
+          #    备份布局**镜像 ~/.lyco/**：模板在 templates/ 下、网页在 web/ 下。
+          #    这是「可恢复」的前提 —— 平铺布局下用户看到 backup/1.2.0/main.c 与
+          #    backup/1.2.0/web/index.html，推不出各自该回到哪儿。
+          printf '1.2.0' > "$T/.version"
+          printf '/* USER-ORIGINAL */\n' > "$T/main.c"
+          printf '<html>USER-PAGE</html>' > "$W/index.html"
+          "$LYCO" new demo c > "$OUT/log1" 2>&1
+          cat "$OUT/log1"
+          test -f "$BK/1.2.0/templates/main.c" || { echo "❌ 备份没镜像 templates/"; exit 1; }
+          test -f "$BK/1.2.0/web/index.html" || { echo "❌ 备份没镜像 web/"; exit 1; }
+
+          # ② 不带参数 = 列出可用备份：名字、文件数、多久以前、被谁替换
+          "$LYCO" restore > "$OUT/list" 2>&1
+          cat "$OUT/list"
+          grep -q '可用备份' "$OUT/list" || { echo "❌ 没列出可用备份"; exit 1; }
+          grep -q '1.2.0' "$OUT/list" || { echo "❌ 列表里没有 1.2.0"; exit 1; }
+          grep -q '个文件' "$OUT/list" || { echo "❌ 列表没显示文件数"; exit 1; }
+          grep -q '用法: lyco restore' "$OUT/list" || { echo "❌ 没告诉用户怎么用"; exit 1; }
+
+          # ③ 把当前模板改成与备份不同（模拟用户后来手改了），再恢复
+          printf '/* CURRENT-DIFFERENT */\n' > "$T/main.c"
+          printf '<html>CURRENT-PAGE</html>' > "$W/index.html"
+          "$LYCO" restore 1.2.0 > "$OUT/r1" 2>&1
+          cat "$OUT/r1"
+          grep -q '已从备份' "$OUT/r1" || { echo "❌ 没说恢复了什么"; exit 1; }
+          printf '/* USER-ORIGINAL */\n' > "$OUT/exp_c"
+          cmp -s "$OUT/exp_c" "$T/main.c" || { echo "❌ templates/main.c 没被恢复"; exit 1; }
+          printf '<html>USER-PAGE</html>' > "$OUT/exp_w"
+          cmp -s "$OUT/exp_w" "$W/index.html" \
+            || { echo "❌ 嵌套路径 web/index.html 没被恢复（镜像布局没生效）"; exit 1; }
+
+          # ④ 恢复本身也不能不可逆：覆盖前先把「现状」存下来
+          grep -q '恢复前的内容已先存到' "$OUT/r1" || { echo "❌ 没提示恢复前的现状被存下来了"; exit 1; }
+          PRE="$(ls -d "$BK"/pre-restore-* 2>/dev/null | head -1 || true)"
+          test -n "$PRE" || { echo "❌ 没生成 pre-restore 目录"; exit 1; }
+          printf '/* CURRENT-DIFFERENT */\n' > "$OUT/exp_pre"
+          cmp -s "$OUT/exp_pre" "$PRE/templates/main.c" \
+            || { echo "❌ 恢复前的现状没被存下来（恢复成了不可逆操作）"; exit 1; }
+          printf '<html>CURRENT-PAGE</html>' > "$OUT/exp_pre_w"
+          cmp -s "$OUT/exp_pre_w" "$PRE/web/index.html" \
+            || { echo "❌ 恢复前的 web/index.html 没被存下来"; exit 1; }
+
+          # ⑤ 不碰 .version / .manifest，且必须说明后果 —— 否则用户会以为
+          #    「恢复过 = 一切照旧」，而实际上这些文件之后会被当成「你改过的」保留。
+          grep -q '没有改动' "$OUT/r1" || { echo "❌ 没说明 .version/.manifest 未被改动"; exit 1; }
+          test -f "$T/.manifest" || { echo "❌ .manifest 被动了"; exit 1; }
+          test -f "$T/.version" || { echo "❌ .version 被动了"; exit 1; }
+
+          # ⑥ 非法名字 / 不存在的名字：明确失败 + 给出可操作提示 + 退出码 1
+          if "$LYCO" restore ../evil > "$OUT/e1" 2>&1; then
+            echo "❌ 非法备份名居然成功了"; exit 1
+          fi
+          grep -q '备份名不合法' "$OUT/e1" || { echo "❌ 非法名字的提示不对"; exit 1; }
+          grep -q 'lyco restore' "$OUT/e1" || { echo "❌ 没告诉用户怎么查可用名字"; exit 1; }
+          test ! -e "$HOME/.lyco/evil" || { echo "❌ 恢复路径穿越了 backup/"; exit 1; }
+
+          if "$LYCO" restore no-such-backup > "$OUT/e2" 2>&1; then
+            echo "❌ 不存在的备份居然成功了"; exit 1
+          fi
+          grep -q '找不到备份' "$OUT/e2" || { echo "❌ 不存在时的提示不对"; exit 1; }
+
+          # ⑦ 用户在 backup/ 里自己放的东西：不列出、也不碰（没有 .meta = 不是我们的）
+          mkdir -p "$BK/my-notes"
+          printf 'keep\n' > "$BK/my-notes/keep.txt"
+          "$LYCO" restore > "$OUT/list2" 2>&1
+          if grep -q 'my-notes' "$OUT/list2"; then
+            echo "❌ 把用户自己放的东西也列成备份了"; exit 1
+          fi
+          test -f "$BK/my-notes/keep.txt" || { echo "❌ 动了用户自己放的东西"; exit 1; }
+
+          echo "✅ 备份可恢复：布局镜像、恢复前先存现状、不碰版本戳、非法名字被拒、不动用户的杂物"

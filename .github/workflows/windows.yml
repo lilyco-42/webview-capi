@@ -119,3 +119,55 @@ jobs:
           name: lyco-windows
           path: demo/lyco-cli/lyco/target/release/lyco.exe
           if-no-files-found: error
+
+  # 这个 demo 在根 README 里挂着链接，但仓里没人引用它、也没有任何 CI 构建它，
+  # 于是坏了 18 天没人发现（连编译都过不了）。本 job 就是那条缺失的防线。
+  #
+  # 只能跑 Windows：lib/ 里只有 Windows 产物（webview.dll + webview.lib），
+  # macOS / Linux 得自己编那个 C 库。
+  rust-ffi:
+    name: Rust FFI demo (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 这一步同时守住两个回归：
+      #   * src/lib.rs 的重复定义（E0252）—— 编译期就炸
+      #   * build.rs 的链接配置 —— 找不到导入库时报 LNK1181
+      #     （MSVC 对缺失的 .lib 是硬错误，即使符号没被引用）
+      - name: 构建 demo/rust-ffi
+        working-directory: demo/rust-ffi
+        run: cargo build
+
+      - name: 校验产物（rlib 必须存在）
+        shell: pwsh
+        working-directory: demo/rust-ffi
+        run: |
+          # rlib 存在 <=> crate-type 里含 "lib"。
+          # 少了它这个 crate 谁也用不了 —— 消费方会报
+          #   error[E0433]: cannot find module or crate `webview_capi` in this scope
+          foreach ($f in 'libwebview_capi.rlib', 'webview_capi.dll') {
+            $p = Join-Path 'target/debug' $f
+            if (-not (Test-Path $p)) { throw "缺产物 $p" }
+            "$p  $((Get-Item $p).Length) B"
+          }
+
+      # 上面那个 rlib 断言只是「代理指标」；这条才是真正的用户视角回归测试：
+      # 拿一个独立 crate 真的 use 一次。crate-type / 链接配置 / 公开 API
+      # 任何一处坏了，这里都会编译失败。
+      - name: 独立消费方真的 use 它
+        shell: pwsh
+        run: |
+          $ws  = ($env:GITHUB_WORKSPACE -replace '\\','/')
+          $dir = Join-Path $env:RUNNER_TEMP 'rust-ffi-consumer'
+          Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+          cargo new $dir --bin --quiet
+          Push-Location $dir
+          cargo add webview-capi --path "$ws/demo/rust-ffi" --quiet
+          Set-Content -Encoding utf8 'src/main.rs' 'fn main() { let w = webview_capi::WebView::new(false); println!("{}", w.is_some()); }'
+          cargo build
+          Pop-Location
+          '消费方编译通过 —— 这个 crate 真的能被 use'

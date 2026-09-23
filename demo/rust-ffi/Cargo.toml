@@ -2,10 +2,12 @@
 name = "webview-capi"
 version = "0.1.0"
 edition = "2021"
-description = "C API for WebView2 - callable from any language"
+# 原来这里是仓库本身的描述（"C API for WebView2 - callable from any language"），
+# 但这个 crate 是 **Rust 绑定**、C 侧调不了（见 [lib] 下面的注释），描述与事实不符。
+description = "Rust 绑定：webview C API（lib/webview.dll）的安全封装"
 license = "MIT"
 repository = "https://github.com/lilyco-42/webview-capi"
-keywords = ["webview", "webview2", "c-api", "ffi"]
+keywords = ["webview", "webview2", "ffi", "bindings"]
 categories = ["ffi", "gui"]
 
 [lib]
@@ -20,8 +22,7 @@ path = "src/lib.rs"
 # 这里只做「加」，不删原有产物，保持向后兼容。
 crate-type = ["lib", "cdylib", "staticlib"]
 
-[dependencies]
-libc = "0.2"
-
-[build-dependencies]
-cc = "1.0"
+# 无第三方依赖：类型取自 std（std::os::raw / std::ffi），
+# 链接目标由 build.rs 指定（仓库根的 lib/webview.lib）。
+# 原来这里挂着 `libc = "0.2"` 与 `[build-dependencies] cc = "1.0"`，
+# 但 src/lib.rs 与 build.rs 都没有引用过它们 —— 是复制粘贴残留，已删。

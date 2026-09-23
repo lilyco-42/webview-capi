@@ -50,13 +50,15 @@ webview-capi = "*"
 ```
 
 - `lyco build` 每次从清单重新生成 `xmake.lua` (生成物, 勿手编)
-- 依赖写法与 Cargo.toml 同风格: `"1.0"` 或 `{ version = "*", git = "..." }`
+- 依赖写法与 Cargo.toml 同风格: `"1.0"` 或 `{ version = "1.0" }`
+  (目前只读 `version` 键; `git` / `path` 等尚未实现, 写了会被忽略)
 
 ## 傻瓜依赖注册表
 
 | 依赖 | lyco 自动处理 |
 |------|--------------|
 | `webview-capi` | lyco-mirror 镜像源 + user32/shell32/ole32/oleaut32/shlwapi/version + webview.dll 随 exe |
+| `webview-mini` | 同 webview-capi 系统库 |
 | `webui` | ws2_32/user32/gdi32/shell32/ole32 |
 | `webview` | 同 webview-capi 系统库 |
 

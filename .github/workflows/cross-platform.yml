@@ -36,7 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
+          n=0
           while IFS= read -r f; do
+            n=$((n + 1))
             hits="$(sed 's/\r$//' "$f" \
               | LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' \
               | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
@@ -46,11 +48,16 @@ jobs:
               bad=1
             fi
           done < <(find .github/workflows -name '*.yml'; find . -name '*.sh' -not -path '*/target/*' -not -path './.git/*')
+          # 防空转：一个文件都没扫到，说明 find 的路径已经不对了，别静默通过
+          if [ "$n" -eq 0 ]; then
+            echo "❌ 一个文件都没扫到 —— 检查 find 的路径是否还对"
+            exit 1
+          fi
           if [ "$bad" -ne 0 ]; then
             echo "  修法：把 \$VAR 写成 \${VAR}"
             exit 1
           fi
-          echo "✅ 没有「变量紧跟非 ASCII」的写法"
+          echo "✅ 扫描 $n 个文件，没有「变量紧跟非 ASCII」的写法"
 
   lyco-e2e:
     name: lyco 端到端 (${{ matrix.os }})

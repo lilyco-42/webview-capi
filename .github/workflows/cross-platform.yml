@@ -701,3 +701,85 @@ jobs:
           grep -q 'b/c/r/t/d' "$W/help" || { echo "❌ 帮助里丢了别名说明"; exit 1; }
 
           echo "✅ 帮助文本 / lyco list / 实际派发三者一致（$(printf '%s\n' "$list_cmds" | grep -c .) 个命令）"
+
+      - name: -r / --target 必须真的生效（不许解析完就丢）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin" "$W/xp" "$W/cm"
+
+          # 假的 xmake / cmake：把收到的参数原样打印、退出 0。
+          # 「参数有没有真的传下去」于是变成**可观察的输出**，且不需要真装 xmake。
+          cat > "$W/bin/xmake" <<'XMAKE'
+          #!/bin/sh
+          printf '%s\n' "$*"
+          exit 0
+          XMAKE
+          chmod +x "$W/bin/xmake"
+          cp "$W/bin/xmake" "$W/bin/cmake"
+
+          printf 'target("x")\n' > "$W/xp/xmake.lua"
+          printf 'project(x)\n' > "$W/cm/CMakeLists.txt"
+
+          # ① 只有 xmake.lua 的目录：-r 必须变成 xmake 的 `-m release`。
+          #    旧行为：`Command::new("xmake")` 光杆一条 —— xmake 一个参数都收不到，
+          #    然后照样打印「✅ 完成」（建的其实是 debug）。
+          out=$(cd "$W/xp" && env PATH="$W/bin" "$LYCO" build -r 2>&1) || true
+          printf '%s' "$out" | grep -q '\-m release' \
+            || { echo "❌ lyco build -r 没把 -m release 传给 xmake"; printf '%s\n' "$out"; exit 1; }
+
+          # ② --target 必须变成 `-p <plat>`
+          out=$(cd "$W/xp" && env PATH="$W/bin" "$LYCO" build --target android 2>&1) || true
+          printf '%s' "$out" | grep -q '\-p android' \
+            || { echo "❌ lyco build --target android 没把 -p android 传给 xmake"; printf '%s\n' "$out"; exit 1; }
+
+          # ③ 非法平台必须**失败**。旧行为：平台名从没被校验过 → 按宿主平台构建
+          #    → 「✅ 完成」。而**有 Lyco.toml 时**它是会报「未知平台」的 ——
+          #    同一件事两条路径给出相反答案。
+          if (cd "$W/xp" && env PATH="$W/bin" "$LYCO" build --target bogus) > "$W/o3" 2>&1; then
+            echo "❌ --target bogus 居然成功了（非法平台被静默忽略）"; cat "$W/o3"; exit 1
+          fi
+          grep -q '未知平台' "$W/o3" || { echo "❌ 没说清是未知平台"; cat "$W/o3"; exit 1; }
+
+          # ④ run 也必须把旗标带下去。旧行为：`cmd_build(&[])` —— cmd_args 整个丢掉。
+          out=$(cd "$W/xp" && env PATH="$W/bin" "$LYCO" run -r --target android 2>&1) || true
+          printf '%s' "$out" | grep -q '\-m release' \
+            || { echo "❌ lyco run -r 没把 -m release 传给 xmake"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '\-p android' \
+            || { echo "❌ lyco run --target android 没把 -p android 传给 xmake"; printf '%s\n' "$out"; exit 1; }
+
+          # ⑤ CMake 工程 + --target：必须**明确拒绝**。cmake 交叉编译需要工具链文件，
+          #    lyco 不提供 —— 那就说「不支持」，而不是默默按宿主平台构建再报成功。
+          if (cd "$W/cm" && env PATH="$W/bin" "$LYCO" build --target android) > "$W/o5" 2>&1; then
+            echo "❌ CMake 工程 + --target 居然成功了（按宿主平台建完还报成功）"; cat "$W/o5"; exit 1
+          fi
+          grep -q '只支持 xmake 工程' "$W/o5" || { echo "❌ 没说明 CMake 工程不支持 --target"; cat "$W/o5"; exit 1; }
+
+          # ⑥ CMake 工程的 run：必须说清「lyco run 只支持 xmake 工程」，
+          #    而不是让 xmake 去报「xmake.lua not found」（用户看不出这是我们的限制）。
+          if (cd "$W/cm" && env PATH="$W/bin" "$LYCO" run) > "$W/o6" 2>&1; then
+            echo "❌ CMake 工程的 lyco run 居然成功了"; cat "$W/o6"; exit 1
+          fi
+          grep -q '只支持 xmake 工程' "$W/o6" || { echo "❌ CMake 工程的 run 没说清原因"; cat "$W/o6"; exit 1; }
+
+          # ⑦ CMake 侧的 -r 要变成 -DCMAKE_BUILD_TYPE=Release
+          out=$(cd "$W/cm" && env PATH="$W/bin" "$LYCO" build -r 2>&1) || true
+          printf '%s' "$out" | grep -q 'CMAKE_BUILD_TYPE=Release' \
+            || { echo "❌ lyco build -r 没给 cmake 传 -DCMAKE_BUILD_TYPE=Release"; printf '%s\n' "$out"; exit 1; }
+
+          # ⑧ 「xmake 起不来」时不许把真实错误丢掉、换成猜出来的结论。
+          #    原来两条路径都写 `.map_err(|_| "xmake 未安装 (scoop install xmake)")`
+          #    —— PATH 没配 / 没权限 / 目录不对，全都被报成「未安装」，而且
+          #    唯一的线索（真实 io 错误）被抹掉了。统一成 `无法执行 xmake: <真实错误>`。
+          mkdir -p "$W/toml"
+          printf '[package]\nname = "x"\nversion = "0.1.0"\n' > "$W/toml/Lyco.toml"
+          if (cd "$W/toml" && env PATH=/nonexistent "$LYCO" build) > "$W/o8" 2>&1; then
+            echo "❌ xmake 跑不起来时 lyco build 却成功了"; cat "$W/o8"; exit 1
+          fi
+          grep -q '无法执行 xmake' "$W/o8" \
+            || { echo "❌ 没报告「无法执行 xmake」（真实错误被丢掉/换成了猜测）"; cat "$W/o8"; exit 1; }
+
+          echo "✅ -r / --target 在 xmake 与 CMake 两条路径上都真的生效（或明确拒绝）"

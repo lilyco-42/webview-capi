@@ -691,6 +691,154 @@ fn find_built_exe(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+// ── 已安装命令的清单（`~/.lyco/installed.toml`） ─────────────
+//
+// `~/.lyco/bin` 原来是**只写不读**的：`install` 往里拷文件、`uninstall` 按
+// **文件名**去猜，中间没有任何记录。于是三件事都做不到：
+//
+//   1. `lyco info` / `lyco list` 完全不提这个目录 —— 用户装了东西之后
+//      **没有任何手段枚举**自己装过什么（`info` 甚至打了「模板 / 外部命令 /
+//      已注册项目」三个计数，偏偏漏了这个）；
+//   2. `lyco install myapp` 覆盖掉**另一个项目**装的 `myapp` 时一声不响；
+//   3. `lyco uninstall`（不带名字）按**项目名**找文件 —— 而
+//      `lyco install myapp` 装出来的文件叫 `myapp`，于是它报「未安装」，
+//      用户以为卸干净了，其实那个命令还在 `bin/` 里。
+//
+// 实测（修复前，`~/.lyco/bin/myapp.exe` 确实是项目 p1 装的）：
+//
+//     $ lyco uninstall
+//     ℹ 未安装: C:\...\.lyco\bin\p1.exe
+//     $ echo $?
+//     0
+//
+// 清单放在 `~/.lyco/installed.toml`（**不放进 `bin/`**）：`bin/` 里应该只有
+// 「能被 PATH 直接调用的东西」，`ls ~/.lyco/bin` 看到的就是全部命令。
+//
+// 为什么是 TOML 而不是 JSON：`serde_json` 不是这个 crate 的依赖，而 `toml`
+// 是（`Lyco.toml` 本来就要解析）。为一个辅助文件新引一个依赖不值。
+
+/// 清单里的一条：**哪个项目**把**哪个名字**装进了 `bin/`。
+///
+/// `#[serde(default)]`（容器级）让**缺字段也能解析** —— 用户手改这份文件、
+/// 或者哪天加了新字段，都不该让 `read_installed()` 直接退化成「空清单」
+/// （那会让 `lyco info` 静默地不再列出任何已安装命令）。
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+#[serde(default)]
+struct Installed {
+    /// `bin/` 里的命令名（不含 `EXE_SUFFIX`）
+    name: String,
+    /// 装它的项目名（`Lyco.toml` 的 `package.name`）
+    project: String,
+    /// 构建产物路径（覆盖别人时能告诉用户「这东西是从哪来的」）
+    source: String,
+    /// 安装时间（Unix 秒）。没引 chrono，只用一个标准算法换算成日期。
+    when: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct InstalledFile {
+    #[serde(default)]
+    installed: Vec<Installed>,
+}
+
+fn installed_path() -> PathBuf { super::data_dir().join("installed.toml") }
+
+/// 读清单。**文件不在 / 解析不了都当空**（一个辅助文件坏了，不该让
+/// `lyco info` 直接报错），并且**丢掉文件已经不存在的条目** ——
+/// 用户手动 `rm ~/.lyco/bin/myapp.exe` 之后，清单里不该留一个幽灵条目
+/// （「判据要能自愈」那条：判「有没有可用条目」，别判「文件在不在」）。
+fn read_installed() -> Vec<Installed> {
+    let t = match fs::read_to_string(installed_path()) { Ok(t) => t, Err(_) => return Vec::new() };
+    let f: InstalledFile = match toml::from_str(&t) { Ok(f) => f, Err(_) => return Vec::new() };
+    let bin = super::data_dir().join("bin");
+    f.installed
+        .into_iter()
+        .filter(|i| bin.join(format!("{}{EXE_SUFFIX}", i.name)).exists())
+        .collect()
+}
+
+/// 写回清单。**先写临时文件再改名** —— 中途失败不会留下半份清单。
+///
+/// 返回 `Err` 时调用方**不要**把整个操作报成失败（文件已经装好了），
+/// 而是把「清单没更新」这件事单独说出来。
+fn write_installed(list: &[Installed]) -> Result<(), String> {
+    let f = InstalledFile { installed: list.to_vec() };
+    let t = toml::to_string(&f).map_err(|e| format!("无法序列化: {e}"))?;
+    let p = installed_path();
+    let tmp = p.with_extension("toml.tmp");
+    fs::write(&tmp, t).map_err(|e| format!("无法写 {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &p).map_err(|e| format!("无法更新 {}: {e}", p.display()))?;
+    Ok(())
+}
+
+/// 清单更新失败时的统一说法：**说清后果**，而不是静默吞掉。
+fn warn_manifest(e: &str) {
+    println!("⚠ 已安装命令的清单没能更新: {e}");
+    println!("   (命令本身没问题; 但 `lyco info` / `lyco list` 不会列出它)");
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Unix 秒 → `(年, 月, 日)`，**UTC**。
+///
+/// 没引 chrono —— 只需要一个日期，用标准的 civil_from_days 就够。
+/// 用 UTC 而不是本地时区：CI 的 runner 时区不固定，本地时区会让断言飘。
+fn ymd(secs: u64) -> (i64, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
+/// 供 `lyco info` / `lyco list` 用的 `YYYY-MM-DD`。
+pub fn day(secs: u64) -> String {
+    let (y, m, d) = ymd(secs);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 供 `lyco info` / `lyco list` 用：`(命令名, 项目名, 安装时间)`，按名字排序。
+pub fn installed() -> Vec<(String, String, u64)> {
+    let mut v: Vec<(String, String, u64)> = read_installed()
+        .into_iter()
+        .map(|i| (i.name, i.project, i.when))
+        .collect();
+    v.sort();
+    v
+}
+
+/// `bin/` 里**真实存在**的命令名（去掉 `EXE_SUFFIX`），排序。
+///
+/// 与 `read_installed()` 的区别：这个不看清单、只看文件系统。两个一起用，
+/// 就能发现「清单里没有、但文件在」的情况（老版本 lyco 装的、或用户自己放的）。
+fn bin_entries(bin: &Path) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(bin) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if !p.is_file() { continue; }
+            let f = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match f.strip_suffix(EXE_SUFFIX) {
+                Some(s) if !s.is_empty() => v.push(s.to_string()),
+                _ => continue,
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
 /// 构建 (release) 并安装到 `~/.lyco/bin`。
 ///
 /// `name` 就是帮助里写的 `lyco install [名字]`。它**一直**在帮助里写着，但
@@ -709,30 +857,114 @@ pub fn install(name: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| format!("构建产物未找到 (build/**/{proj}{EXE_SUFFIX})"))?;
     let dest_dir = super::data_dir().join("bin");
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let installed = name.unwrap_or(&proj);
-    let dest = dest_dir.join(format!("{installed}{EXE_SUFFIX}"));
-    fs::copy(&exe, &dest).map_err(|e| e.to_string())?;
+    let cmd = name.unwrap_or(&proj);
+    let dest = dest_dir.join(format!("{cmd}{EXE_SUFFIX}"));
+
+    // ── 覆盖之前先说清楚覆盖了什么 ──
+    // 原来是直接 `fs::copy`：如果 `bin/myapp` 是**另一个项目**装的，
+    // 用户一个字都不会看到，而他的命令已经被换掉了。
+    let mut list = read_installed();
+    match list.iter().find(|i| i.name == cmd) {
+        Some(prev) if prev.project == proj => {
+            println!("↻ 重新安装 {cmd}（覆盖上一次自己装的）");
+        }
+        Some(prev) => {
+            println!("⚠ 覆盖 {cmd} —— 它原先是项目 {} 装的", prev.project);
+            println!("   (原构建产物: {})", prev.source);
+        }
+        None if dest.exists() => {
+            // 文件在、清单里没有：老版本 lyco 装的，或者用户自己放进去的。
+            println!("⚠ 覆盖 {cmd}{EXE_SUFFIX} —— 它已经存在，但不是 lyco 装的");
+            println!("   ({})", dest.display());
+        }
+        None => {}
+    }
+
+    fs::copy(&exe, &dest).map_err(|e| format!("无法安装到 {}: {e}", dest.display()))?;
     println!("✅ 已安装 {}", dest.display());
-    if installed != proj {
+    if cmd != proj {
         // 改名安装时把两件事都说清：装成了什么、怎么卸掉。
-        // 不说的话，`lyco uninstall`（不带名字）会去找项目名，然后报「未安装」。
-        println!("   (项目 {proj} → 命令 {installed}; 卸载: lyco uninstall {installed})");
+        println!("   (项目 {proj} → 命令 {cmd}; 卸载: lyco uninstall {cmd})");
     }
     println!("   提示: 把 {} 加入 PATH 后可全局调用", dest_dir.display());
+
+    // ── 记进清单 ──
+    // `lyco info` / `lyco list` / `uninstall`（不带名字）都靠它。
+    // 文件已经装好了，所以清单写失败**不算安装失败** —— 但必须说出来。
+    let src = fs::canonicalize(&exe).map(|p| super::tidy_path(&p)).unwrap_or_else(|_| super::tidy_path(&exe));
+    list.retain(|i| i.name != cmd);
+    list.push(Installed {
+        name: cmd.to_string(),
+        project: proj.clone(),
+        source: src,
+        when: now_secs(),
+    });
+    if let Err(e) = write_installed(&list) { warn_manifest(&e); }
     Ok(())
 }
 
+/// `lyco uninstall [名字]`。
+///
+/// * `Some(name)` —— 卸那一个。
+/// * `None` —— 卸**当前项目装的全部命令**，按清单查。
+///
+/// 原来 `None` 是按**文件名** `<项目名>` 找 —— 而 `lyco install myapp`
+/// 装出来的文件叫 `myapp`，于是它报「未安装」并**退出 0**。
+/// 实测（修复前）：`bin/myapp.exe` 确实是当前项目装的，而
+/// `lyco uninstall` 输出 `ℹ 未安装: …\p1.exe`、`$? = 0`。
+///
+/// 现在 `None` 且清单里没有当前项目的条目时：
+///   * `bin/` 确实空 → 幂等成功（并把「为什么没卸到」说清）；
+///   * `bin/` 里有别的东西 → **报错退出**，并把它们列出来。
+///     不能只说「未安装」：那会让用户以为已经卸干净了。
 pub fn uninstall(name: Option<&str>) -> Result<(), String> {
-    let n = match name {
-        Some(n) => n.to_string(),
-        None => Manifest::load()?.project_name(),
+    let bin = super::data_dir().join("bin");
+    let mut list = read_installed();
+
+    let names: Vec<String> = match name {
+        Some(n) => vec![n.to_string()],
+        None => {
+            let proj = Manifest::load()?.project_name();
+            let mine: Vec<String> = list
+                .iter()
+                .filter(|i| i.project == proj)
+                .map(|i| i.name.clone())
+                .collect();
+            if mine.is_empty() {
+                let others = bin_entries(&bin);
+                if others.is_empty() {
+                    println!("ℹ 项目 {proj} 没有已安装的命令（{} 是空的）", bin.display());
+                    return Ok(());
+                }
+                return Err(format!(
+                    "项目 {proj} 没有已安装的命令, 但 {} 里有 {} 个: {}\n   \
+                     (要卸哪一个: lyco uninstall <名字>)",
+                    bin.display(),
+                    others.len(),
+                    others.join(", ")
+                ));
+            }
+            mine
+        }
     };
-    let p = super::data_dir().join("bin").join(format!("{n}{EXE_SUFFIX}"));
-    if p.exists() {
-        fs::remove_file(&p).map_err(|e| e.to_string())?;
-        println!("✅ 已卸载 {}", p.display());
-    } else {
-        println!("ℹ 未安装: {}", p.display());
+
+    let mut done = 0;
+    for n in &names {
+        let p = bin.join(format!("{n}{EXE_SUFFIX}"));
+        if p.exists() {
+            fs::remove_file(&p).map_err(|e| format!("无法删除 {}: {e}", p.display()))?;
+            println!("✅ 已卸载 {}", p.display());
+            done += 1;
+        } else {
+            println!("ℹ 未安装: {}", p.display());
+        }
+        // 清单条目一并清掉（`read_installed` 已经把「文件不在」的条目滤掉了，
+        // 但这里还是要清 —— 否则刚删掉的那条会留在文件里）。
+        list.retain(|i| i.name != *n);
+    }
+    if let Err(e) = write_installed(&list) { warn_manifest(&e); }
+    if names.len() > 1 {
+        println!("   (共 {done} 个)");
     }
     Ok(())
 }

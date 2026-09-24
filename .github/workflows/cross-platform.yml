@@ -1414,3 +1414,146 @@ jobs:
             || { echo "❌ 没有 OUTPUT_DIRECTORY 时没退回默认 docs/api"; printf '%s\n' "$out"; exit 1; }
 
           echo "✅ lyco doc：输出路径从 Doxyfile 里读（改了就跟着变），首页不存在时如实说没找到，缺 OUTPUT_DIRECTORY 时退回 docs/api"
+
+      # `~/.lyco/bin` 原来是**只写不读**的：`install` 往里拷文件、`uninstall`
+      # 按**文件名**去猜，中间没有任何记录。实测（修复前，`bin/myapp.exe`
+      # 确实是项目 p1 装的）：
+      #
+      #     $ lyco uninstall          # 在 p1 目录里
+      #     ℹ 未安装: C:\...\.lyco\bin\p1.exe
+      #     $ echo $?
+      #     0
+      #
+      # —— 用户以为卸干净了，而 `myapp` 还在 `bin/` 里（若该目录在 PATH 上，
+      # 那个命令照样能敲）。同一批问题还有两个：`lyco info` / `lyco list`
+      # 完全不提这个目录（装了东西却没处枚举），以及 `lyco install myapp`
+      # 覆盖掉**另一个项目**装的 `myapp` 时一声不响。
+      #
+      # 修法：新增 `~/.lyco/installed.toml` 清单（项目 ↔ 命令名 ↔ 构建产物），
+      # `install` 写、`uninstall` 按**清单**查（不再按文件名猜）、
+      # `info` / `list` 列出来。
+      #
+      # 注意本步的断言全部走**独立进程**：`info` 在另一个 `lyco` 进程里跑，
+      # 它只能通过**真的写进磁盘的清单**知道装过什么 —— 所以「清单有没有真的
+      # 落盘」不需要单独断言，② 本身就是证据。
+      - name: ~/.lyco/bin 装了东西必须看得见、卸得掉（install/uninstall 清单）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME/.lyco" "$W/bin"
+
+          # 可执行后缀：`lyco install` 用的是 `std::env::consts::EXE_SUFFIX`。
+          # 本 job 只跑 ubuntu / macos（空串），但写全了才不会在加 Windows 时
+          # 变成一条「看着在测其实测不到」的断言。
+          SUF=""
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) SUF=".exe" ;;
+          esac
+
+          # 假 xmake：退出 0。构建产物由 fixture 自己**预摆好** —— 于是
+          # 「install 拷的到底是哪个文件」是我们摆好的事实，不是我们替被测程序猜的。
+          cat > "$W/bin/xmake" <<'XMAKE'
+          #!/bin/sh
+          exit 0
+          XMAKE
+          chmod +x "$W/bin/xmake"
+
+          BIN="$W/home/.lyco/bin"
+          mkproj() {  # $1 = 项目名；预摆构建产物，内容是标记串
+            mkdir -p "$W/$1/build/x64/release" "$W/$1/src"
+            printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$1" > "$W/$1/Lyco.toml"
+            printf 'int main(void){return 0;}\n' > "$W/$1/src/main.c"
+            printf 'PAYLOAD-%s\n' "$1" > "$W/$1/build/x64/release/$1$SUF"
+          }
+          payload() { cat "$BIN/$1$SUF" 2>/dev/null | head -1; }
+
+          mkproj p1
+
+          # ⓪ 判据自检：**什么都没装**时，info 必须说「已安装命令: 0 个」。
+          #    否则下面「装完之后是 1 个」证明不了任何事（可能是恒为 1 的假计数）。
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" info 2>&1) || {
+            echo "❌ lyco info 失败了"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q '已安装命令: 0 个' \
+            || { echo "❌ 自检失败：没装任何东西时 info 没说「已安装命令: 0 个」"; printf '%s\n' "$o"; exit 1; }
+
+          # ① 用别名装
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" install myapp 2>&1) || {
+            echo "❌ lyco install myapp 失败了"; printf '%s\n' "$o"; exit 1; }
+          [ "$(payload myapp)" = "PAYLOAD-p1" ] \
+            || { echo "❌ bin/myapp$SUF 不是 p1 的产物（实际: $(payload myapp)）"; ls -l "$BIN"; exit 1; }
+
+          # ② 装了就必须看得见：info 与 list 都要列出，且说明是哪个项目装的
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -q '已安装命令: 1 个' \
+            || { echo "❌ info 没有把已安装命令算进去"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q 'myapp ← 项目 p1' \
+            || { echo "❌ info 没有列出 myapp ← 项目 p1"; printf '%s\n' "$o"; exit 1; }
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" list 2>&1)
+          printf '%s' "$o" | grep -q '已安装命令 (1):' \
+            || { echo "❌ list 没有已安装命令段落"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q 'myapp' \
+            || { echo "❌ list 没有列出 myapp"; printf '%s\n' "$o"; exit 1; }
+
+          # ③ 不带名字卸载 = 卸掉**当前项目**装的命令（按清单，不是按文件名猜）。
+          #    旧行为：报「未安装: …\p1$SUF」并退出 0，myapp 还在。
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" uninstall 2>&1) || {
+            echo "❌ 不带名字的 uninstall 失败了（旧行为就是在这里报「未安装」）"; printf '%s\n' "$o"; exit 1; }
+          [ ! -e "$BIN/myapp$SUF" ] \
+            || { echo "❌ uninstall 之后 bin/myapp$SUF 还在"; ls -l "$BIN"; exit 1; }
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -q '已安装命令: 0 个' \
+            || { echo "❌ 卸载之后 info 仍然说有已安装命令"; printf '%s\n' "$o"; exit 1; }
+
+          # ④ 覆盖**别的项目**装的同名命令时，必须说清覆盖了谁的
+          mkproj p2
+          (cd "$W/p1" && env PATH="$W/bin" "$LYCO" install myapp) > /dev/null 2>&1 \
+            || { echo "❌ p1 重新 install myapp 失败"; exit 1; }
+          o=$(cd "$W/p2" && env PATH="$W/bin" "$LYCO" install myapp 2>&1) || {
+            echo "❌ p2 install myapp 失败"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q '覆盖 myapp' \
+            || { echo "❌ 覆盖别的项目装的 myapp 时没有任何提示"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q '项目 p1' \
+            || { echo "❌ 提示里没说清覆盖的是哪个项目装的"; printf '%s\n' "$o"; exit 1; }
+          [ "$(payload myapp)" = "PAYLOAD-p2" ] \
+            || { echo "❌ myapp 没被换成 p2 的产物"; exit 1; }
+
+          # ⑤ 在 p1 目录里不带名字卸载，而 bin 里只有 p2 装的 myapp
+          #    → **必须失败**。不能只说「未安装」：那会让用户以为已经卸干净了。
+          rc=0
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" uninstall 2>&1) || rc=$?
+          [ "$rc" -ne 0 ] \
+            || { echo "❌ p1 没装过 myapp，不带名字卸载却报成功（用户会以为卸干净了）"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -q 'myapp' \
+            || { echo "❌ 失败信息里没有列出 bin 里到底有什么"; printf '%s\n' "$o"; exit 1; }
+          [ -e "$BIN/myapp$SUF" ] \
+            || { echo "❌ 它不该删掉 p2 装的 myapp"; exit 1; }
+
+          # ⑥ 判据自检：bin 真的空时，不带名字卸载**要**成功（幂等）——
+          #    证明 ⑤ 不是「一律报错」。
+          rm -f "$BIN/myapp$SUF"
+          (cd "$W/p1" && env PATH="$W/bin" "$LYCO" uninstall) > "$W/o6" 2>&1 \
+            || { echo "❌ bin 空的时候不带名字卸载不该失败"; cat "$W/o6"; exit 1; }
+
+          # ⑦ 手动删掉 exe 之后，info 不许再列它（清单要自愈）
+          (cd "$W/p1" && env PATH="$W/bin" "$LYCO" install myapp) > /dev/null 2>&1 \
+            || { echo "❌ install 失败"; exit 1; }
+          rm -f "$BIN/myapp$SUF"
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -q '已安装命令: 0 个' \
+            || { echo "❌ 手动删掉 exe 之后 info 仍然列出幽灵条目"; printf '%s\n' "$o"; exit 1; }
+
+          # ⑧ 按名字卸载也要清清单（不能只删文件、留个幽灵条目）
+          (cd "$W/p1" && env PATH="$W/bin" "$LYCO" install myapp) > /dev/null 2>&1 \
+            || { echo "❌ install 失败"; exit 1; }
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" uninstall myapp 2>&1) || {
+            echo "❌ uninstall myapp 失败"; printf '%s\n' "$o"; exit 1; }
+          [ ! -e "$BIN/myapp$SUF" ] \
+            || { echo "❌ uninstall myapp 之后文件还在"; exit 1; }
+          o=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -q '已安装命令: 0 个' \
+            || { echo "❌ 按名字卸载之后 info 仍然说有已安装命令"; printf '%s\n' "$o"; exit 1; }
+
+          echo "✅ lyco bin：装了什么能看见（info/list 跨进程读清单）、不带名字卸载按清单卸、覆盖别人的命令会说话、bin 空时幂等成功、清单能自愈"

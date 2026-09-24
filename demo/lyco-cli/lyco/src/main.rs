@@ -1475,7 +1475,18 @@ fn cmd_info() {
             .unwrap_or(0);
         let c = fs::read_dir(commands_dir()).map(|r| r.count()).unwrap_or(0);
         let n = db::list_projects().len();
-        println!("  模板: {t} 文件 | 外部命令: {c} 文件 | 已注册项目: {n} 个");
+        // `~/.lyco/bin` 原来**不在这行统计里** —— 而它恰恰是用户最依赖的那个
+        // 目录（`lyco install` 装出来的命令靠它才能被全局调用）。装了东西却
+        // 没有任何地方能枚举，等于「看不见」。现在它是第四个计数，
+        // 下面还会逐条列出来。
+        let inst = manifest::installed();
+        println!(
+            "  模板: {t} 文件 | 外部命令: {c} 文件 | 已注册项目: {n} 个 | 已安装命令: {} 个",
+            inst.len()
+        );
+        for (name, proj, when) in &inst {
+            println!("    {name} ← 项目 {proj} ({})", manifest::day(*when));
+        }
     }
     // 当前目录有清单时，把项目本身也报出来。
     // `Lyco.toml` 的 `version` 字段原来解析了却从来没被读过
@@ -1515,6 +1526,17 @@ fn cmd_list() {
     // 从 COMMANDS 生成，别再手写第二份清单 —— 见 COMMANDS 的注释。
     let names: Vec<&str> = COMMANDS.iter().map(|(n, _, _)| *n).collect();
     println!("内置命令: {}", names.join(" "));
+
+    // 已安装的命令（`lyco install` 放进 `~/.lyco/bin` 的）。
+    // 原来这里只列「内置命令」和「外部命令（插件）」—— `bin/` 完全不可见，
+    // 用户装了 3 个命令之后没有任何办法知道自己装过什么。
+    let inst = manifest::installed();
+    if !inst.is_empty() {
+        println!("已安装命令 ({}):", inst.len());
+        for (name, proj, when) in &inst {
+            println!("  {name:<16} ← 项目 {proj}  ({})", manifest::day(*when));
+        }
+    }
     let dir = commands_dir();
     if let Ok(rd) = fs::read_dir(dir) {
         let ext = if cfg!(windows) { "dll" } else { "so" };

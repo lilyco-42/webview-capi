@@ -334,7 +334,28 @@ jobs:
             echo "❌ 备份目录是隐藏的（用户看不见自己的备份）"; exit 1
           fi
 
-          echo "✅ 覆盖前都会备份，且备份目录可发现、路径不可穿越"
+          # ⑥ 同一个旧戳被覆盖**两次** → 两份备份都必须留着。
+          #    真实路径：清单损坏自愈、或 `~/.lyco` 只读导致版本戳写不进去时，
+          #    每次运行都以为自己是"第一次"，都往同一个目录写备份 ——
+          #    第二次的 fs::copy 会把第一次的备份盖掉，而那份可能是用户**唯一**的副本。
+          rm -rf "$BK"
+          printf 'garbage-without-tab\n' > "$T/.manifest"   # 清单坏 → 每次都按默认覆盖
+          printf '1.2.0' > "$T/.version"
+          printf '/* CUSTOM-A */\n' > "$T/main.c"
+          "$LYCO" new demo6a c > "$OUT/log6a" 2>&1
+          printf 'garbage-without-tab\n' > "$T/.manifest"   # 又坏（或压根写不进去）
+          printf '1.2.0' > "$T/.version"                    # 戳也没更新（模拟只读目录）
+          printf '/* CUSTOM-B */\n' > "$T/main.c"
+          "$LYCO" new demo6b c > "$OUT/log6b" 2>&1
+
+          printf '/* CUSTOM-A */\n' > "$OUT/exp6a"
+          cmp -s "$OUT/exp6a" "$BK/1.2.0/templates/main.c" \
+            || { echo "❌ 第一次的备份被第二次盖掉了（用户唯一的副本被毁）"; exit 1; }
+          printf '/* CUSTOM-B */\n' > "$OUT/exp6b"
+          cmp -s "$OUT/exp6b" "$BK/1.2.0-2/templates/main.c" \
+            || { echo "❌ 第二次的备份不在 1.2.0-2（实际: $(ls -A "$BK" 2>/dev/null | tr '\n' ' ')）"; exit 1; }
+
+          echo "✅ 覆盖前都会备份，且备份目录可发现、路径不可穿越、同戳重复覆盖不互相销毁"
       - name: 备份不会无限堆积（保留最近 N 份, 且只动自己的东西）
         shell: bash
         run: |
@@ -497,4 +518,30 @@ jobs:
           fi
           test -f "$BK/my-notes/keep.txt" || { echo "❌ 动了用户自己放的东西"; exit 1; }
 
-          echo "✅ 备份可恢复：布局镜像、恢复前先存现状、不碰版本戳、非法名字被拒、不动用户的杂物"
+          # ⑧ 同一个旧戳被覆盖两次 → 两份都在列表里，且各自能恢复回**自己**那一份。
+          #    这是 ⑥（上一条防线）的「可用性」侧：不只不能丢，还得能分辨出要的是哪一份。
+          rm -rf "$BK"
+          printf 'garbage-without-tab\n' > "$T/.manifest"
+          printf '1.2.0' > "$T/.version"
+          printf '/* ROUND-A */\n' > "$T/main.c"
+          "$LYCO" new demo8a c > "$OUT/log8a" 2>&1
+          printf 'garbage-without-tab\n' > "$T/.manifest"
+          printf '1.2.0' > "$T/.version"
+          printf '/* ROUND-B */\n' > "$T/main.c"
+          "$LYCO" new demo8b c > "$OUT/log8b" 2>&1
+
+          "$LYCO" restore > "$OUT/list3" 2>&1
+          grep -q '1.2.0-2' "$OUT/list3" \
+            || { echo "❌ 第二次的备份没出现在列表里"; cat "$OUT/list3"; exit 1; }
+
+          "$LYCO" restore 1.2.0 > /dev/null 2>&1
+          printf '/* ROUND-A */\n' > "$OUT/exp8a"
+          cmp -s "$OUT/exp8a" "$T/main.c" \
+            || { echo "❌ 恢复 1.2.0 拿到的不是第一次那份"; exit 1; }
+
+          "$LYCO" restore 1.2.0-2 > /dev/null 2>&1
+          printf '/* ROUND-B */\n' > "$OUT/exp8b"
+          cmp -s "$OUT/exp8b" "$T/main.c" \
+            || { echo "❌ 恢复 1.2.0-2 拿到的不是第二次那份"; exit 1; }
+
+          echo "✅ 备份可恢复：布局镜像、恢复前先存现状、不碰版本戳、非法名字被拒、不动用户的杂物、同戳多份可分辨"

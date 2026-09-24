@@ -253,7 +253,9 @@ fn sanitize_stamp(s: &str) -> String {
 ///
 /// 另外，**凡是要覆盖掉一份不同的内容，先把它备份**到
 /// `~/.lyco/backup/<旧版本戳>/`（布局镜像 `~/.lyco/`，所以 `cp -r` 就能放回去；
-/// 也可以直接用 `lyco restore <版本戳>`）。这是兜底：迁移那一次和清单损坏自愈那一次，
+/// 也可以直接用 `lyco restore <版本戳>`）。同一个旧戳被覆盖两次时**不会互相覆盖** ——
+/// 第二次会退让成 `<旧版本戳>-2`、`-3`…（见 `unique_backup_dir`）。
+/// 这是兜底：迁移那一次和清单损坏自愈那一次，
 /// 我们**无从判断**哪些文件是用户的心血，备份至少让损失可恢复；
 /// 「存在但读不出来」（非 UTF-8）的文件也是靠这一层救回来的
 /// —— 否则它会被当成"不存在"直接覆盖掉。
@@ -335,8 +337,9 @@ fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<Releas
         if existed && cur.as_deref() != Some(content) {
             let target = {
                 if rep.backup_dir.is_none() {
-                    rep.backup_dir =
-                        Some(data_dir().join("backup").join(sanitize_stamp(old_stamp)));
+                    // 用 unique_backup_dir 而不是直接 join：同一个旧戳被覆盖两次时，
+                    // 第二次不能把第一次的备份盖掉（见函数注释）。
+                    rep.backup_dir = Some(unique_backup_dir(&sanitize_stamp(old_stamp)));
                 }
                 rep.backup_dir.as_ref().unwrap().join(&backup_rel)
             };
@@ -379,6 +382,32 @@ fn release_templates(old_stamp: &str, new_stamp: &str) -> std::io::Result<Releas
     let pruned = prune_backups(backup_keep(), rep.backup_dir.as_deref());
     rep.pruned = pruned;
     Ok(rep)
+}
+
+/// 给备份找一个**还没被占用**的目录名。
+///
+/// 为什么需要它：备份目录名只含「被覆盖的那一版戳」。同一个旧戳被覆盖两次时
+/// （清单损坏自愈、或用户手动把 `.version` 改回旧值），两次会写进同一个目录 ——
+/// 第二次的 `fs::copy` 会把**第一次的备份覆盖掉**，而那份可能就是用户唯一的副本。
+/// 所以这里退让一位：`1.2.0` 被占了就用 `1.2.0-2`、`1.2.0-3`…
+///
+/// 生成的名字必须仍是 `sanitize_stamp` 的不动点（只含 `[A-Za-z0-9._-]`），
+/// 否则 `prune_backups` / `cmd_restore` 的「只认自己的东西」判据会把它当用户的杂物跳过。
+fn unique_backup_dir(base: &str) -> PathBuf {
+    let root = backup_root();
+    let first = root.join(base);
+    if !first.exists() {
+        return first;
+    }
+    // 上限只是防御性的：正常最多撞一两次。
+    for i in 2u32..10_000 {
+        let cand = root.join(format!("{base}-{i}"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    // 极端情况（同一秒里撞上万次）—— 时间戳兜底，仍是合法名字。
+    root.join(format!("{base}-{}", now_secs()))
 }
 
 /// 备份目录的排序键（越大越新）。
@@ -553,8 +582,8 @@ fn backup_rel_to_dest(rel: &str) -> PathBuf {
 /// 要的结果（我就是要这一版）。若顺手把清单改成恢复后的内容，下一次释放会
 /// 立刻把它们覆盖掉，恢复等于白做。
 ///
-/// 恢复会覆盖**当前**内容，所以先把当前内容存一份（`backup/pre-restore-<秒>/`）
-/// —— 不能让"恢复"本身变成一次新的丢失。
+/// 恢复会覆盖**当前**内容，所以先把当前内容存一份（`backup/pre-restore-<秒>/`，
+/// 同一秒内恢复两次会退让成 `-2`、`-3`…）—— 不能让"恢复"本身变成一次新的丢失。
 fn cmd_restore(args: &[String]) {
     let root = backup_root();
     let mut dirs: Vec<(u64, PathBuf)> = Vec::new();
@@ -614,7 +643,8 @@ fn cmd_restore(args: &[String]) {
         std::process::exit(1);
     }
 
-    let pre = root.join(format!("pre-restore-{}", now_secs()));
+    // 同样走 unique_backup_dir：同一秒内恢复两次也不会互相覆盖。
+    let pre = unique_backup_dir(&format!("pre-restore-{}", now_secs()));
     let mut restored: Vec<String> = Vec::new();
     let mut saved: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();

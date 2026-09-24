@@ -903,6 +903,25 @@ fn parse_build_flags(cmd_args: &[String]) -> (bool, Option<String>) {
     (release, target)
 }
 
+/// 跑一个子进程，把「启动不了」和「退出码非 0」都变成**失败**。
+///
+/// 这一段原来全是 `let _ = Command::new(..).status()` —— 把退出码整个吞掉，
+/// 然后无条件打印「✅ 完成」。后果是**同一件事有两套说法**：有 `Lyco.toml`
+/// 时 `manifest::build` 会如实报错，没有清单时却编译失败也报成功；连
+/// 「什么工程文件都没有、压根没干活」也报成功。用户看到 ✅ 就去跑产物，
+/// 发现根本没有 —— 属于报喜不报忧。
+fn run_step(what: &str, mut cmd: Command) -> Result<(), String> {
+    match cmd.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(match s.code() {
+            Some(c) => format!("{what} 失败 (退出码 {c})"),
+            // 被信号终止时 code() 是 None（Unix 上 SIGINT/SIGKILL 都这样）
+            None => format!("{what} 被信号终止"),
+        }),
+        Err(e) => Err(format!("无法执行 {what}: {e}")),
+    }
+}
+
 fn cmd_build(cmd_args: &[String]) {
     let (release, target) = parse_build_flags(cmd_args);
     if Path::new(manifest::MANIFEST).exists() {
@@ -912,14 +931,40 @@ fn cmd_build(cmd_args: &[String]) {
         }
         return;
     }
-    println!("🔨 构建...");
-    if Path::new("xmake.lua").exists() { let _ = Command::new("xmake").status(); }
-    else if Path::new("CMakeLists.txt").exists() {
-        let _ = fs::create_dir_all("build");
-        let _ = Command::new("cmake").args([".."]).current_dir("build").status();
-        let _ = Command::new("cmake").args(["--build", "."]).current_dir("build").status();
+
+    // 没有 `Lyco.toml` → 兼容手写的 xmake / cmake 工程。
+    //
+    // 这一段原来把子进程退出码整个吞掉（`let _ = …status()`），再无条件打印
+    // 「✅ 完成」：编译失败报成功，**连一个工程文件都没有、压根没干活**也报成功
+    // —— 而且这两种情况的输出一模一样，用户根本分不出自己属于哪种。
+    let r: Result<(), String> = if Path::new("xmake.lua").exists() {
+        println!("🔨 构建 (xmake)...");
+        run_step("xmake", Command::new("xmake"))
+    } else if Path::new("CMakeLists.txt").exists() {
+        println!("🔨 构建 (cmake)...");
+        let mut r = fs::create_dir_all("build").map_err(|e| format!("创建 build/ 失败: {e}"));
+        if r.is_ok() {
+            let mut c = Command::new("cmake");
+            c.args([".."]).current_dir("build");
+            r = run_step("cmake 配置", c);
+        }
+        if r.is_ok() {
+            let mut c = Command::new("cmake");
+            c.args(["--build", "."]).current_dir("build");
+            r = run_step("cmake 构建", c);
+        }
+        r
+    } else {
+        Err("当前目录没有可构建的工程: Lyco.toml / xmake.lua / CMakeLists.txt 都不存在".to_string())
+    };
+    match r {
+        Ok(()) => println!("✅ 完成"),
+        Err(e) => {
+            eprintln!("❌ {e}");
+            eprintln!("   装 xmake: scoop install xmake   或 https://xmake.io");
+            std::process::exit(1);
+        }
     }
-    println!("✅ 完成");
 }
 
 fn cmd_run(cmd_args: &[String]) {
@@ -930,9 +975,16 @@ fn cmd_run(cmd_args: &[String]) {
         }
         return;
     }
+    // 非 `Lyco.toml` 工程：先构建。构建不成功会在 `cmd_build` 里 `exit(1)`，
+    // 走不到「▶ 运行...」—— 原来那句 `let _ = xmake run` 是**构建失败也照跑**。
     cmd_build(&[]);
     println!("▶ 运行...");
-    let _ = Command::new("xmake").arg("run").status();
+    let mut c = Command::new("xmake");
+    c.arg("run");
+    if let Err(e) = run_step("xmake run", c) {
+        eprintln!("❌ {e}");
+        std::process::exit(1);
+    }
 }
 
 /// `lyco add <dep>[@<ver>] [--git <url> | --path <dir>]`
@@ -992,11 +1044,20 @@ fn cmd_remove(dep: &str) {
 
 fn cmd_clean() {
     let dirs = ["build", ".xmake"];
+    let mut failed: Vec<String> = Vec::new();
     for d in dirs {
         if Path::new(d).exists() {
-            let _ = fs::remove_dir_all(d);
-            println!("🧹 已清除 {d}/");
+            // 原来 `let _ = fs::remove_dir_all(d)` 之后无条件报「已清除」——
+            // 删不掉（权限不足 / 被占用 / 同名的是个文件）也说清了。
+            match fs::remove_dir_all(d) {
+                Ok(()) => println!("🧹 已清除 {d}/"),
+                Err(e) => failed.push(format!("{d} ({e})")),
+            }
         }
+    }
+    if !failed.is_empty() {
+        eprintln!("❌ 以下内容没能清除: {}", failed.join(", "));
+        std::process::exit(1);
     }
 }
 
@@ -1028,12 +1089,23 @@ fn cmd_doc() {
     if !ok { eprintln!("doc 需要 doxygen (scoop install doxygen)"); std::process::exit(1); }
     if !Path::new("Doxyfile").exists() {
         let name = manifest::Manifest::load().map(|m| m.project_name()).unwrap_or_else(|_| "app".into());
-        fs::write("Doxyfile", format!(
+        // 原来是 `.expect(...)` —— 写不进去就 panic，甩一屏 backtrace 给用户看。
+        if let Err(e) = fs::write("Doxyfile", format!(
             "PROJECT_NAME = \"{name}\"\nINPUT = src\nRECURSIVE = YES\nGENERATE_HTML = YES\nGENERATE_LATEX = NO\nOUTPUT_DIRECTORY = docs/api\nQUIET = YES\n"
-        )).expect("写 Doxyfile 失败");
+        )) {
+            eprintln!("❌ 写 Doxyfile 失败: {e}");
+            std::process::exit(1);
+        }
         println!("📄 已生成默认 Doxyfile (可自行修改)");
     }
-    let _ = Command::new("doxygen").arg("Doxyfile").status();
+    // 原来是 `let _ = …status()` 再无条件报「✅ 文档输出」——
+    // doxygen 出错（Doxyfile 写坏、源码有语法问题）也会被告知「已输出」。
+    let mut c = Command::new("doxygen");
+    c.arg("Doxyfile");
+    if let Err(e) = run_step("doxygen", c) {
+        eprintln!("❌ {e}");
+        std::process::exit(1);
+    }
     println!("✅ 文档输出: docs/api/html/index.html");
 }
 
@@ -1384,8 +1456,14 @@ fn main() {
         "init"  => cmd_init(cmd_args.first().map(|s| s.as_str())),
         "update" => {
             println!("⬆ 更新包仓库 (xmake repo -u) ...");
-            let st = Command::new("xmake").args(["repo", "-u"]).status();
-            if st.map(|s| s.success()).unwrap_or(false) { println!("✅ 已更新"); }
+            // 原来失败时**什么都不打印**、退出码还是 0 —— 用户以为已经更新过了。
+            let mut c = Command::new("xmake");
+            c.args(["repo", "-u"]);
+            if let Err(e) = run_step("xmake repo -u", c) {
+                eprintln!("❌ {e}");
+                std::process::exit(1);
+            }
+            println!("✅ 已更新");
         },
         "search" => manifest::search(cmd_args.first().map(|s| s.as_str()).unwrap_or("")),
         "install" => if let Err(e) = manifest::install() { eprintln!("❌ {e}"); std::process::exit(1); },

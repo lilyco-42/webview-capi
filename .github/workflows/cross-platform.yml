@@ -545,3 +545,61 @@ jobs:
             || { echo "❌ 恢复 1.2.0-2 拿到的不是第二次那份"; exit 1; }
 
           echo "✅ 备份可恢复：布局镜像、恢复前先存现状、不碰版本戳、非法名字被拒、不动用户的杂物、同戳多份可分辨"
+
+      # 这一条守的是「不许谎报成功」。`lyco build` / `run` / `clean` / `update`
+      # 原来把子进程退出码整个吞掉（`let _ = …status()`），再无条件打印
+      # 「✅ 完成」：编译失败报成功，连「一个工程文件都没有、压根没干活」也报
+      # 成功 —— 而且这两种情况的输出**一模一样**，用户根本分不出自己属于哪种。
+      #
+      # 每条都用 `env PATH=/nonexistent` 跑：这样 xmake 一定找不到，断言就不依赖
+      # 「runner 上装没装 xmake」，每次都必然走到失败分支 —— 不是可能空转的断言。
+      - name: 构建/运行/清除失败不许报成功
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME"
+          NO="/nonexistent"
+
+          # ① 没有工程文件：必须失败，并说清为什么（不能静默成功）
+          mkdir -p "$W/emptyproj"
+          if (cd "$W/emptyproj" && env PATH="$NO" "$LYCO" build) > "$W/o1" 2>&1; then
+            echo "❌ 没有工程文件时 lyco build 却成功了"; cat "$W/o1"; exit 1
+          fi
+          grep -q '没有可构建的工程' "$W/o1" || { echo "❌ 没说清为什么不能构建"; cat "$W/o1"; exit 1; }
+
+          # ② xmake 跑不起来：必须失败，且**不许**出现「✅ 完成」
+          mkdir -p "$W/badproj"
+          printf 'this is not valid lua @@@\n' > "$W/badproj/xmake.lua"
+          if (cd "$W/badproj" && env PATH="$NO" "$LYCO" build) > "$W/o2" 2>&1; then
+            echo "❌ 构建失败时 lyco build 却报成功"; cat "$W/o2"; exit 1
+          fi
+          if grep -q '✅ 完成' "$W/o2"; then
+            echo "❌ 构建失败却打印了「✅ 完成」"; cat "$W/o2"; exit 1
+          fi
+          grep -qE 'xmake.*失败|无法执行 xmake' "$W/o2" || { echo "❌ 构建失败没有说明原因"; cat "$W/o2"; exit 1; }
+
+          # ③ 构建失败时 lyco run 不许继续假装要运行
+          if (cd "$W/badproj" && env PATH="$NO" "$LYCO" run) > "$W/o3" 2>&1; then
+            echo "❌ 构建失败时 lyco run 却成功"; cat "$W/o3"; exit 1
+          fi
+
+          # ④ lyco clean：build 是个**文件**（删目录必然失败）→ 必须报失败
+          mkdir -p "$W/cleanproj"
+          : > "$W/cleanproj/build"
+          if (cd "$W/cleanproj" && env PATH="$NO" "$LYCO" clean) > "$W/o4" 2>&1; then
+            echo "❌ 清除失败时 lyco clean 却报成功"; cat "$W/o4"; exit 1
+          fi
+          grep -q '没能清除' "$W/o4" || { echo "❌ 清除失败没有说明原因"; cat "$W/o4"; exit 1; }
+
+          # ⑤ lyco update：退出码与输出必须自洽。旧行为是「失败也退出码 0、一声不吭」，
+          #    所以这条**不是重言式** —— 它专门抓「退出码 0 却什么都没报告」。
+          if (cd "$W" && env PATH="$NO" "$LYCO" update) > "$W/o5" 2>&1; then
+            grep -q '已更新' "$W/o5" || { echo "❌ lyco update 退出码 0 却没报告更新成功"; cat "$W/o5"; exit 1; }
+          else
+            grep -qE 'repo -u.*失败|无法执行' "$W/o5" || { echo "❌ lyco update 失败却没说原因"; cat "$W/o5"; exit 1; }
+          fi
+
+          echo "✅ 失败不再静默：没工程 / 编译失败 / 清除失败 / 更新失败都如实上报，退出码非 0"

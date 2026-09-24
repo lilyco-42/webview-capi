@@ -1557,3 +1557,140 @@ jobs:
             || { echo "❌ 按名字卸载之后 info 仍然说有已安装命令"; printf '%s\n' "$o"; exit 1; }
 
           echo "✅ lyco bin：装了什么能看见（info/list 跨进程读清单）、不带名字卸载按清单卸、覆盖别人的命令会说话、bin 空时幂等成功、清单能自愈"
+
+      # `install` 原来每次都念同一句「提示: 把 <dir> 加入 PATH 后可全局调用」，
+      # **从来不读 PATH**（实测：bin 在 / 不在 PATH 里，输出一字不差），
+      # `lyco info` 也一个字不提。这一条钉两件事：
+      #   ① 两组说法必须**不同**（否则就是没看 PATH）；
+      #   ② 两组说法必须**和事实对得上** —— 靠真的敲一遍 `myapp` 来证，
+      #      而不是只看它自己说「已在 PATH 里」。
+      - name: 「bin 在不在 PATH 里」必须真的去看 PATH（不许每次照念同一句提示）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME/.lyco" "$W/bin"
+
+          SUF=""
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) SUF=".exe" ;;
+          esac
+
+          cat > "$W/bin/xmake" <<'XMAKE'
+          #!/bin/sh
+          exit 0
+          XMAKE
+          chmod +x "$W/bin/xmake"
+
+          BIN="$W/home/.lyco/bin"
+          # 预摆一个**真的能跑**的构建产物：内容是 `echo RAN-<项目名>` 的脚本。
+          # 于是「在 PATH 里就敲得到」这句话能被**执行本身**证明，
+          # 而不是只看它自己说「已在 PATH 里」。
+          mkproj() {
+            mkdir -p "$W/$1/build/x64/release" "$W/$1/src"
+            printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$1" > "$W/$1/Lyco.toml"
+            printf 'int main(void){return 0;}\n' > "$W/$1/src/main.c"
+            printf '#!/bin/sh\necho RAN-%s\n' "$1" > "$W/$1/build/x64/release/$1$SUF"
+            chmod +x "$W/$1/build/x64/release/$1$SUF"
+          }
+          mkproj p1
+
+          # 两组 PATH：WITHOUT 只有假 xmake；WITH 再加上 ~/.lyco/bin。
+          # 两组都用 POSIX 形式（`:` 分隔）写 —— Windows 的 git-bash 会把 PATH
+          # 转成原生形式再交给 lyco（实测 `/c/a:/c/b` → `C:\a;C:\b`），
+          # 所以同一个写法在两个平台都成立。
+          PATH_WITHOUT="$W/bin"
+          PATH_WITH="$W/bin:$BIN"
+
+          # ⓪ 判据自检：**什么都没装**时，info 不许提 PATH —— 那只是噪音。
+          #    配对的正向断言是 ⑤（装了之后必须提）。缺了 ⓪，⑤ 就可能是恒真
+          #    （grep 的模式写错了也会「通过」）。
+          o=$(cd "$W/p1" && env PATH="$PATH_WITHOUT" "$LYCO" info 2>&1) || {
+            echo "❌ lyco info 失败了"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '已安装命令: 0 个' \
+            || { echo "❌ 自检失败：info 根本没跑起来"; printf '%s\n' "$o"; exit 1; }
+          if printf '%s' "$o" | grep -qF 'PATH:'; then
+            echo "❌ 自检失败：一个命令都没装，info 就已经在说 PATH 了"; printf '%s\n' "$o"; exit 1
+          fi
+
+          # ① A 组：bin **不在** PATH 里 —— 必须说「还不在」。
+          #    旧行为就是在这里照念那句套话（在/不在输出完全一样）。
+          o=$(cd "$W/p1" && env PATH="$PATH_WITHOUT" "$LYCO" install myapp 2>&1) || {
+            echo "❌ lyco install myapp 失败了"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '还不在 PATH 里' \
+            || { echo "❌ bin 不在 PATH 里，install 却没说清（旧行为在这里照念套话）"; printf '%s\n' "$o"; exit 1; }
+          if printf '%s' "$o" | grep -qF '已在 PATH 里'; then
+            echo "❌ bin 不在 PATH 里，install 却说「已在 PATH 里」"; printf '%s\n' "$o"; exit 1
+          fi
+          # 说了「不在」就得说怎么加 —— 否则只是把一句套话换成另一句套话
+          if [ -z "$SUF" ]; then
+            printf '%s' "$o" | grep -qF 'export PATH' \
+              || { echo "❌ 没告诉用户怎么把目录加进 PATH"; printf '%s\n' "$o"; exit 1; }
+          else
+            printf '%s' "$o" | grep -qF 'set PATH' \
+              || { echo "❌ 没告诉用户怎么把目录加进 PATH"; printf '%s\n' "$o"; exit 1; }
+          fi
+
+          # ② ①的说法必须和事实对得上：在这个 PATH 下敲 myapp，真的敲不到。
+          #    127 = shell 报「找不到」；126 才是「找到了但不能执行」。
+          rc=0
+          out=$(cd "$W/p1" && export PATH="$PATH_WITHOUT" && myapp 2>&1) || rc=$?
+          [ "$rc" -eq 127 ] \
+            || { echo "❌ 说「还不在 PATH 里」，可是 shell 并不是「找不到」（rc=${rc}）"; printf '%s\n' "$out"; exit 1; }
+
+          # ③ B 组：bin **在** PATH 里 —— 必须说「已在」，且不许再说「不在」。
+          rm -f "$BIN/myapp$SUF"
+          o=$(cd "$W/p1" && env PATH="$PATH_WITH" "$LYCO" install myapp 2>&1) || {
+            echo "❌ lyco install myapp 失败了（bin 在 PATH 里那一组）"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '已在 PATH 里' \
+            || { echo "❌ bin 已经在 PATH 里，install 还是念「不在」那句（等于没看 PATH）"; printf '%s\n' "$o"; exit 1; }
+          if printf '%s' "$o" | grep -qF '不在 PATH 里'; then
+            echo "❌ bin 在 PATH 里，install 却同时说「不在 PATH 里」"; printf '%s\n' "$o"; exit 1
+          fi
+
+          # ④ ③的说法也必须和事实对得上：在这个 PATH 下敲 myapp，真的跑起来。
+          rc=0
+          out=$(cd "$W/p1" && export PATH="$PATH_WITH" && myapp 2>&1) || rc=$?
+          [ "$rc" -ne 127 ] \
+            || { echo "❌ 说「已在 PATH 里」，可是 shell 还是找不到 myapp"; printf '%s\n' "$out"; exit 1; }
+          if [ -z "$SUF" ]; then
+            [ "$out" = "RAN-p1" ] \
+              || { echo "❌ 敲 myapp 的输出不对（实际: ${out}）"; exit 1; }
+          fi
+
+          # ⑤ 装了就必须看得见「能不能敲到」：info 要报，而且要随 A/B 两组变化。
+          #    （旧行为：info 一个字都不提 PATH。）
+          o=$(cd "$W/p1" && env PATH="$PATH_WITHOUT" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -qF 'PATH:' \
+            || { echo "❌ info 完全不提 PATH（装了东西却不说敲不敲得到）"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '不在 PATH 里' \
+            || { echo "❌ bin 不在 PATH 里，info 却没这么说"; printf '%s\n' "$o"; exit 1; }
+          o=$(cd "$W/p1" && env PATH="$PATH_WITH" "$LYCO" info 2>&1)
+          printf '%s' "$o" | grep -qF '已在 PATH 里' \
+            || { echo "❌ bin 在 PATH 里，info 却没这么说（同一句话不随事实变）"; printf '%s\n' "$o"; exit 1; }
+
+          # ⑥ list 说的是同一件事，两处不许说法不一致
+          o=$(cd "$W/p1" && env PATH="$PATH_WITHOUT" "$LYCO" list 2>&1)
+          printf '%s' "$o" | grep -qF 'PATH:' \
+            || { echo "❌ list 不提 PATH，而 info 提 —— 同一件事两处说法不一致"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '不在 PATH 里' \
+            || { echo "❌ list 里的 PATH 说法和事实不符"; printf '%s\n' "$o"; exit 1; }
+
+          # ⑦ PATH 里带尾斜杠也算命中 —— 用户手加 PATH 时经常写成 `<dir>/`
+          rm -f "$BIN/myapp$SUF"
+          o=$(cd "$W/p1" && env PATH="$W/bin:$BIN/" "$LYCO" install myapp 2>&1) || {
+            echo "❌ install 失败（尾斜杠那一组）"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '已在 PATH 里' \
+            || { echo "❌ PATH 里写的是「<dir>/」，没认出来，又叫用户去加一遍"; printf '%s\n' "$o"; exit 1; }
+
+          # ⑧ 兄弟目录不算命中 —— 前缀/子串匹配会让「已在 PATH 里」变成假话
+          #    （`~/.lyco/bin-old` 里没有 myapp，用户的 shell 敲不到）。
+          mkdir -p "$BIN-old"
+          o=$(cd "$W/p1" && env PATH="$W/bin:$BIN-old" "$LYCO" install myapp 2>&1) || {
+            echo "❌ install 失败（兄弟目录那一组）"; printf '%s\n' "$o"; exit 1; }
+          printf '%s' "$o" | grep -qF '还不在 PATH 里' \
+            || { echo "❌ PATH 里只有 bin-old，却被当成 bin 了（前缀匹配）"; printf '%s\n' "$o"; exit 1; }
+
+          echo "✅ PATH：install 真的读 PATH（两组说法不同）、info/list 都报这个状态、尾斜杠算命中、兄弟目录不算命中；且「敲得到/敲不到」两句话都被真的敲了一遍"

@@ -839,6 +839,115 @@ fn bin_entries(bin: &Path) -> Vec<String> {
     v
 }
 
+// ── 「bin 到底在不在 PATH 里」─────────────────────────────────
+//
+// `install` 原来每次都念同一句「提示: 把 <dir> 加入 PATH 后可全局调用」——
+// **从来不读 PATH**。实测（修复前，main `0d7cbe69`）：
+//
+//     # bin 不在 PATH 里
+//     $ lyco install myapp
+//       提示: 把 C:\...\.lyco\bin 加入 PATH 后可全局调用
+//     # bin 已经在 PATH 里
+//     $ lyco install myapp
+//       提示: 把 C:\...\.lyco\bin 加入 PATH 后可全局调用      ← 一字不差
+//
+// 已经加过的用户每次被念一遍；没加过的用户把这句话当成一句套话，然后敲
+// `myapp` 得到 `command not found`（实测退出码 127）。`lyco info` 也一个字
+// 不提。**能检查的事实，别用提示代替**（同 §27「服务起不来照样给地址」）。
+
+/// 「在 PATH 里」/「不在 PATH 里」这两句话的锚点。
+///
+/// `install` 与 `lyco info` / `lyco list` **共用同一份说法**：写两遍的话，
+/// 一处改了另一处不改，用户会看到自相矛盾的两句话。CI 的断言也钉在这两个串
+/// 上（`note_text_and_markers_are_sound` 保证一个不是另一个的子串 ——
+/// 否则「在」和「不在」两条断言会同时成立/同时失败，等于没测）。
+const ON_PATH: &str = "已在 PATH 里";
+const OFF_PATH: &str = "不在 PATH 里";
+
+/// 削掉路径尾部的分隔符（`/tmp/x/` → `/tmp/x`、`C:\a\` → `C:\a`）。
+///
+/// **全是分隔符时原样返回**（`/` → `/`）：削成空串的话，正好跟 `PATH` 里
+/// 「当前目录」那个空条目的样子撞上，`/` 会被误判成命中。
+/// （`C:\` 削成 `C:` 是对的 —— 这两种写法在 `PATH` 里指同一个地方，
+/// 削成同一个串才能互相命中。）
+fn trim_seps(s: &str) -> String {
+    let t = s.trim_end_matches(['/', '\\']);
+    if t.is_empty() { s.to_string() } else { t.to_string() }
+}
+
+/// 路径字符串比较：Windows 上大小写不敏感（文件系统就是），其它平台逐字节。
+fn eq_path(a: &str, b: &str) -> bool {
+    if cfg!(windows) { a.eq_ignore_ascii_case(b) } else { a == b }
+}
+
+/// 从一份 `PATH` 字符串里找 `dir`：找到返回**命中的那一条**（原样），否则 `None`。
+///
+/// 做成纯函数是为了能**真的测**：读环境变量那一层没法在单元测试里改
+/// （edition 2024 里 `set_var` 是 unsafe），而会写错的地方恰恰是平台差异 ——
+/// 全在这个函数里。
+///
+/// 逐个处理的坑：
+///   * 分隔符 —— Windows `;`、其它 `:`（跟 `EXE_SUFFIX` 一样，让平台自己给答案）；
+///   * 空条目跳过（`;;`、结尾的 `;`、Unix 上开头的 `:`）—— 那是「当前目录」；
+///   * 条目两端可能有引号（Windows 上目录带空格时常见）；
+///   * 条目可能带尾部分隔符（`C:\x\`）—— 削掉再比；
+///   * 只做**整条相等**，不做前缀/子串：`~/.lyco/bin-old` 不是 `~/.lyco/bin`。
+fn match_in_path(raw: &str, dir: &str) -> Option<String> {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let want = trim_seps(dir);
+    if want.is_empty() { return None; }
+    for entry in raw.split(sep) {
+        let e = entry.trim().trim_matches('"');
+        if e.is_empty() { continue; }
+        if eq_path(&trim_seps(e), &want) {
+            return Some(e.to_string());
+        }
+    }
+    None
+}
+
+/// `~/.lyco/bin` 在不在 `PATH` 里（命中就返回那一条）。
+fn bin_on_path() -> Option<String> {
+    let raw = env::var_os("PATH")?;
+    let bin = super::data_dir().join("bin");
+    match_in_path(&raw.to_string_lossy(), &bin.to_string_lossy())
+}
+
+/// 「`bin/` 在不在 PATH 里」这句话本身。与「要不要说」分开，纯逻辑好测。
+fn note_text(on_path: bool, shown: &str) -> String {
+    if on_path {
+        format!("{shown} {ON_PATH}")
+    } else {
+        format!("{shown} {OFF_PATH} —— 已安装的命令敲不到")
+    }
+}
+
+/// 给 `lyco info` / `lyco list` 用的一句话。
+///
+/// 返回 `None` = **没什么好说的**：`bin/` 里一个命令都没有，那时候 PATH 配没配
+/// 跟用户无关，说了只是噪音。判的是**文件系统**里有没有东西（`bin_entries`），
+/// 不是清单里有没有 —— 老版本 lyco 装的、用户自己拷进去的都不在清单里，
+/// 但它们同样敲不到。
+pub fn path_note() -> Option<String> {
+    let bin = super::data_dir().join("bin");
+    if bin_entries(&bin).is_empty() { return None; }
+    Some(note_text(bin_on_path().is_some(), &super::tidy_path(&bin)))
+}
+
+/// 把 `bin/` 加进 `PATH` 的具体做法（按平台）。
+///
+/// 光说「不在 PATH 里」只是把一句套话换成另一句套话 —— 得给出下一步。
+/// 只给**当前会话**的写法 + 「永久」的方向，**不替用户改系统环境变量**：
+/// 静默改 `PATH` 是另一类「不打招呼就动用户东西」。
+fn path_howto() -> String {
+    let d = super::tidy_path(&super::data_dir().join("bin"));
+    if cfg!(windows) {
+        format!("当前会话: set PATH=%PATH%;{d}   永久: 系统属性 → 环境变量 → Path 里加一条")
+    } else {
+        format!("当前会话: export PATH=\"$PATH:{d}\"   永久: 追加到 ~/.bashrc 或 ~/.zshrc")
+    }
+}
+
 /// 构建 (release) 并安装到 `~/.lyco/bin`。
 ///
 /// `name` 就是帮助里写的 `lyco install [名字]`。它**一直**在帮助里写着，但
@@ -886,7 +995,16 @@ pub fn install(name: Option<&str>) -> Result<(), String> {
         // 改名安装时把两件事都说清：装成了什么、怎么卸掉。
         println!("   (项目 {proj} → 命令 {cmd}; 卸载: lyco uninstall {cmd})");
     }
-    println!("   提示: 把 {} 加入 PATH 后可全局调用", dest_dir.display());
+    // ── PATH：能检查的事实，别用提示代替 ──
+    // 原来这里是无条件的一句「提示: 把 … 加入 PATH 后可全局调用」——在不在
+    // PATH 里说法完全一样（实测），于是已经加过的人每次被念一遍，没加过的人
+    // 把套话当成背景音。现在真的读 PATH。
+    if bin_on_path().is_some() {
+        println!("   PATH: {ON_PATH}, 可以直接敲 {cmd}");
+    } else {
+        println!("   PATH: 还{OFF_PATH} —— 敲 {cmd} 会 command not found");
+        println!("   ({})", path_howto());
+    }
 
     // ── 记进清单 ──
     // `lyco info` / `lyco list` / `uninstall`（不带名字）都靠它。
@@ -967,4 +1085,129 @@ pub fn uninstall(name: Option<&str>) -> Result<(), String> {
         println!("   (共 {done} 个)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // 只测**纯逻辑**：读环境变量那层在单元测试里动不了环境（edition 2024 的
+    // `set_var` 是 unsafe），而会写错的地方恰恰是分隔符 / 大小写 / 尾斜杠
+    // 这些平台差异 —— 全在 `match_in_path` 里。
+    //
+    // 这个模块跑在 rust.yml 的 `cargo test` 上，**三个平台都跑**
+    // （ubuntu / windows / macos），所以下面 `cfg!(windows)` 的两支都被真的
+    // 执行过，不是「写全了但没人跑」的死断言。
+    use super::*;
+
+    fn sep() -> &'static str { if cfg!(windows) { ";" } else { ":" } }
+    fn join(v: &[&str]) -> String { v.join(sep()) }
+
+    #[test]
+    fn trim_seps_keeps_root() {
+        assert_eq!(trim_seps("/tmp/x/"), "/tmp/x");
+        assert_eq!(trim_seps(r"C:\a\b\"), r"C:\a\b");
+        assert_eq!(trim_seps(r"C:\a\b\\"), r"C:\a\b");
+        assert_eq!(trim_seps("/tmp/x"), "/tmp/x");
+        // 全是分隔符时不许削成空串 —— 空串正是 `PATH` 里「当前目录」那个条目
+        // 的样子，会把 `/` 误判成命中。
+        assert_eq!(trim_seps("/"), "/");
+        assert_eq!(trim_seps("//"), "//");
+        assert_eq!(trim_seps(r"\"), r"\");
+        // `C:\` 削成 `C:` 是对的：这两种写法在 `PATH` 里指同一个地方，
+        // 削成同一个串才能互相命中。
+        assert_eq!(trim_seps(r"C:\"), "C:");
+        assert_eq!(trim_seps(""), "");
+    }
+
+    #[test]
+    fn match_splits_on_platform_separator() {
+        let (a, b) = ("/x/a", "/x/b");
+        assert_eq!(match_in_path(&join(&[a, b]), a).as_deref(), Some(a));
+        assert_eq!(match_in_path(&join(&[a, b]), b).as_deref(), Some(b));
+        // 另一个平台的分隔符在这边是**路径里的普通字符**，不该被拆开
+        let other = if cfg!(windows) { ':' } else { ';' };
+        let wrong = format!("{a}{other}{b}");
+        assert!(match_in_path(&wrong, a).is_none(), "{wrong} 不该被拆成两条");
+    }
+
+    #[test]
+    fn match_ignores_empty_and_quoted_entries() {
+        let d = "/x/a";
+        assert_eq!(match_in_path(&join(&["", d, ""]), d).as_deref(), Some(d));
+        assert!(match_in_path(&join(&["", ""]), d).is_none());
+        // 带引号的条目（Windows 上目录带空格时常见）
+        let q = format!("\"{d}\"");
+        assert_eq!(match_in_path(&join(&["/x/z", q.as_str()]), d).as_deref(), Some(d));
+    }
+
+    #[test]
+    fn match_tolerates_trailing_separator() {
+        let d = "/x/a";
+        // 用户手加 PATH 时经常写成 `<dir>/`
+        assert!(match_in_path(&join(&["/x/z", "/x/a/"]), d).is_some());
+        // 反过来也要成立：要找的目录本身带尾斜杠
+        assert!(match_in_path(&join(&["/x/a"]), "/x/a/").is_some());
+    }
+
+    #[test]
+    fn match_is_not_prefix_matching() {
+        let d = "/x/bin";
+        // 前缀/子串匹配会把兄弟目录也算命中 —— 于是「已在 PATH 里」是句假话，
+        // 用户照着去敲命令，得到 command not found。
+        assert!(match_in_path(&join(&["/x/bin-old"]), d).is_none());
+        assert!(match_in_path(&join(&["/x/bin2"]), d).is_none());
+        assert!(match_in_path(&join(&["/x/b"]), d).is_none());
+        // 而真正的命中还是要命中
+        assert!(match_in_path(&join(&["/x/bin-old", d]), d).is_some());
+    }
+
+    #[test]
+    fn match_case_sensitivity_is_platform_dependent() {
+        let (d, upper) = ("/x/bin", "/X/BIN");
+        if cfg!(windows) {
+            // Windows 的文件系统大小写不敏感，用户手打 `c:\users\...` 很常见；
+            // 逐字节比会误判成「不在 PATH 里」，然后叫人家再加一遍。
+            assert!(match_in_path(&join(&[upper]), d).is_some());
+            assert!(match_in_path(&join(&[d]), upper).is_some());
+        } else {
+            // Unix 上路径**真的**大小写敏感：`/X/BIN` 和 `/x/bin` 是两个目录，
+            // 说「已在 PATH 里」等于让用户去敲一个敲不到的命令。
+            assert!(match_in_path(&join(&[upper]), d).is_none());
+            assert!(match_in_path(&join(&[d]), upper).is_none());
+        }
+    }
+
+    #[test]
+    fn match_rejects_empty_dir() {
+        // `dir` 为空时不许把 `PATH` 里的空条目（`;;`）当成命中
+        assert!(match_in_path(&join(&["", ""]), "").is_none());
+        assert!(match_in_path("", "").is_none());
+    }
+
+    #[test]
+    fn note_text_and_markers_are_sound() {
+        // 这两句是 `install` 和 `info`/`list` 共用的锚点 —— 一个成了另一个的
+        // 子串，CI 里「在」和「不在」两条断言就会同时成立，等于没测。
+        assert!(!ON_PATH.contains(OFF_PATH), "{ON_PATH} 里含 {OFF_PATH}");
+        assert!(!OFF_PATH.contains(ON_PATH), "{OFF_PATH} 里含 {ON_PATH}");
+        assert!(ON_PATH.contains("PATH 里") && OFF_PATH.contains("PATH 里"));
+
+        let on = note_text(true, "/x/.lyco/bin");
+        let off = note_text(false, "/x/.lyco/bin");
+        assert!(on.contains(ON_PATH) && !on.contains(OFF_PATH), "{on}");
+        assert!(off.contains(OFF_PATH) && !off.contains(ON_PATH), "{off}");
+        assert!(on.contains("/x/.lyco/bin") && off.contains("/x/.lyco/bin"), "得写出是哪个目录");
+    }
+
+    #[test]
+    fn howto_gives_the_platform_way() {
+        let t = path_howto();
+        assert!(t.contains(".lyco"), "得写出那个目录: {t}");
+        if cfg!(windows) {
+            assert!(t.contains("set PATH"), "Windows 上给 cmd 的写法: {t}");
+            assert!(t.contains("环境变量"), "Windows 上永久生效的路子: {t}");
+        } else {
+            assert!(t.contains("export PATH"), "Unix 上给 export 的写法: {t}");
+            assert!(t.contains(".bashrc") || t.contains(".zshrc"), "永久生效落在哪: {t}");
+        }
+    }
 }

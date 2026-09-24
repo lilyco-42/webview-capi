@@ -603,3 +603,49 @@ jobs:
           fi
 
           echo "✅ 失败不再静默：没工程 / 编译失败 / 清除失败 / 更新失败都如实上报，退出码非 0"
+
+      # 上一条管「命令失败不许报成功」，这一条管**服务/进程的失败不许被静默掉**。
+      # 两处判据原来都是错的：
+      #   * `lyco web` 用 `status().is_ok()` 判服务起没起来 —— `is_ok()` 只说明
+      #     「进程能启动、并且跑完了」，**完全没看退出码**。端口被占用时
+      #     http.server 立刻以 1 退出，`is_ok()` 照样为真，于是「服务已经死了」
+      #     被报成「起来了」；而且访问地址是在起服务**之前**就打出去的。
+      #   * 插件派发用 `.status().unwrap()` —— 插件存在但没有执行权限
+      #     （Linux/macOS 上忘了 `chmod +x` 是常事）直接 panic，甩一屏 backtrace。
+      - name: 服务起不来 / 插件跑不起来都要说人话
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME"
+
+          # ① 端口非法（99999 超出 0-65535，http.server 必然拒绝启动）→ 必须失败，
+          #    且**不许**打印一个连不上的访问地址（那是把用户送去一个死页面）。
+          #    为什么不用「1 端口」：Windows 上普通用户**能**绑低端口，那个前提不成立；
+          #    为什么不用「被占用的端口」：得起占位进程并保证清理，多一份不确定性。
+          if (cd "$W" && env PORT=99999 "$LYCO" web) > "$W/w1" 2>&1; then
+            echo "❌ 端口起不来时 lyco web 却成功了"; cat "$W/w1"; exit 1
+          fi
+          grep -q '本地服务器没能起来' "$W/w1" || { echo "❌ 没说清服务没起来"; cat "$W/w1"; exit 1; }
+          if grep -q 'http://localhost' "$W/w1"; then
+            echo "❌ 起不来却打印了访问地址（用户会去访问一个死页面）"; cat "$W/w1"; exit 1
+          fi
+
+          # ② 插件本体 + 可执行文件都在，但可执行文件没有执行位 → 必须给人话，
+          #    不许 panic（旧代码是 `.status().unwrap()`）
+          CMDS="$HOME/.lyco/commands"
+          mkdir -p "$CMDS"
+          : > "$CMDS/myplug.so"                  # 标记文件（非 Windows 平台用 .so）
+          printf '#!/bin/sh\necho hi\n' > "$CMDS/myplug"
+          chmod 644 "$CMDS/myplug"               # 故意不给执行位
+          rc=0; out=$(cd "$W" && "$LYCO" myplug 2>&1) || rc=$?
+          [ "$rc" -ne 0 ] || { echo "❌ 插件不可执行时 lyco 却成功了"; printf '%s\n' "$out"; exit 1; }
+          if printf '%s' "$out" | grep -q 'panicked'; then
+            echo "❌ 插件不可执行时 panic 了（应该给人话）"; printf '%s\n' "$out"; exit 1
+          fi
+          printf '%s' "$out" | grep -q '无法执行插件' \
+            || { echo "❌ 没说明插件为什么跑不起来"; printf '%s\n' "$out"; exit 1; }
+
+          echo "✅ 服务起不来时不给死地址、插件跑不起来时给人话（不 panic）"

@@ -225,7 +225,19 @@ jobs:
             || { echo "❌ 版本戳里没有内容指纹"; exit 1; }
 
           # 幂等：再跑一次不该重复释放。指纹不稳定的话会每次都覆盖用户自定义。
-          if "$LYCO" new demo2 c | grep -q "模板已更新"; then
+          #
+          # ⚠️ 下面这条是「**没有**某句话」型判据 —— 命令没跑起来时它**永远为真**：
+          # 管道没有输出 → grep 失败 → if 不进 → 静默通过。所以先把前提钉死：
+          # 第二次运行必须成功、必须真的建出目录、必须有正常输出。
+          # （同一类问题的第 4 处；第 3 处是上面 ③ 那个 macOS 的 `timeout`。）
+          out2=$("$LYCO" new demo2 c 2>&1) || {
+            echo "❌ 第二次 lyco new 失败了 —— 下面的幂等判据会变成空检查"
+            printf '%s\n' "$out2"; exit 1; }
+          [ -d "$OUT/demo2" ] \
+            || { echo "❌ 自检失败：第二次 lyco new 没建出 demo2，幂等判据无效"; exit 1; }
+          printf '%s' "$out2" | grep -q '已创建' \
+            || { echo "❌ 自检失败：第二次 lyco new 没有正常输出，幂等判据无效"; printf '%s\n' "$out2"; exit 1; }
+          if printf '%s' "$out2" | grep -q "模板已更新"; then
             echo "❌ 第二次仍然重释放 —— 版本戳不稳定"; exit 1
           fi
           echo "✅ 老用户的旧模板被更新，且版本戳稳定（不重复释放）"
@@ -715,9 +727,9 @@ jobs:
           run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
           t1=$(date +%s)
           [ -f "$W/rtmark" ] \
-            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=$rc）"; exit 1; }
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=${rc}）"; exit 1; }
           [ "$rc" -ge 128 ] \
-            || { echo "❌ 自检失败：run_timed 返回 $rc（不是被掐掉的 137）"; exit 1; }
+            || { echo "❌ 自检失败：run_timed 返回 ${rc}（不是被掐掉的 137）"; exit 1; }
           [ $((t1 - t0)) -lt 15 ] \
             || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
 
@@ -1054,9 +1066,9 @@ jobs:
           run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
           t1=$(date +%s)
           [ -f "$W/rtmark" ] \
-            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=$rc）"; exit 1; }
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=${rc}）"; exit 1; }
           [ "$rc" -ge 128 ] \
-            || { echo "❌ 自检失败：run_timed 返回 $rc（不是被掐掉的 137）"; exit 1; }
+            || { echo "❌ 自检失败：run_timed 返回 ${rc}（不是被掐掉的 137）"; exit 1; }
           [ $((t1 - t0)) -lt 15 ] \
             || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
 

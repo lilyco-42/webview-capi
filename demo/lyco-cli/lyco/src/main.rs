@@ -936,6 +936,23 @@ fn parse_build_flags(cmd_args: &[String]) -> Result<(bool, Option<String>), Stri
     Ok((release, target))
 }
 
+/// 解析 `install` / `uninstall` 的可选名字参数。
+///
+/// 两个命令在帮助里都写作 `[名字]`，所以判据必须一样：
+///   * 不带参数 → `None`（由 `manifest` 侧退回「当前项目的名字」）；
+///   * 一个不以 `-` 开头的参数 → 就是那个名字；
+///   * 一个以 `-` 开头的参数 → **不是名字**，是写错的旗标，当场报错
+///     （`lyco install --help` 不该去装一个叫 `--help` 的命令）；
+///   * 多于一个 → 多余的参数，当场报错，而不是挑第一个用、把其余咽下去。
+fn install_name<'a>(cmd_args: &'a [String], usage: &str) -> Result<Option<&'a str>, String> {
+    match cmd_args.len() {
+        0 => Ok(None),
+        1 if !cmd_args[0].starts_with('-') => Ok(Some(cmd_args[0].as_str())),
+        1 => Err(format!("未知参数: {}  (用法: {usage})", cmd_args[0])),
+        _ => Err(format!("多余的参数: {}  (用法: {usage})", cmd_args[1..].join(" "))),
+    }
+}
+
 /// 跑一个子进程，把「启动不了」和「退出码非 0」都变成**失败**。
 ///
 /// 这一段原来全是 `let _ = Command::new(..).status()` —— 把退出码整个吞掉，
@@ -1476,8 +1493,8 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("doc",       "",                             "生成文档 (需 doxygen)"),
     ("search",    "[关键词]",                     "搜索依赖注册表"),
     ("update",    "",                             "更新包仓库 (xmake repo -u)"),
-    ("install",   "[name]",                       "构建并安装到 ~/.lyco/bin"),
-    ("uninstall", "[name]",                       "从 ~/.lyco/bin 卸载"),
+    ("install",   "[名字]",                       "构建 (release) 并安装到 ~/.lyco/bin ([名字] 可换命令名)"),
+    ("uninstall", "[名字]",                       "从 ~/.lyco/bin 卸载 (省略 [名字] 时用当前项目名)"),
     ("clean",     "",                             "清除构建产物"),
     ("web",       "",                             "可视化 Web UI (纯静态预览页, 需 python3/python)"),
     ("reset",     "",                             "重置 ~/.lyco/ (模板备份会保留, 见下)"),
@@ -1636,8 +1653,22 @@ fn main() {
             println!("✅ 已更新");
         },
         "search" => manifest::search(cmd_args.first().map(|s| s.as_str()).unwrap_or("")),
-        "install" => if let Err(e) = manifest::install() { eprintln!("❌ {e}"); std::process::exit(1); },
-        "uninstall" => if let Err(e) = manifest::uninstall(cmd_args.first().map(|s| s.as_str())) { eprintln!("❌ {e}"); std::process::exit(1); },
+        // 帮助里写的是 `lyco install [名字]`，但 `manifest::install()` 原来连
+        // 形参都没有 —— 那个参数从来没被读过，`lyco install myapp` 会静默地
+        // 按项目名装成别的名字。这里把它变成真的，同时**不再把写错的参数当名字
+        // 收下**（与 `build` / `run` 的严格校验同一套标准）。
+        "install" => {
+            match install_name(cmd_args, "lyco install [名字]") {
+                Ok(n) => if let Err(e) = manifest::install(n) { eprintln!("❌ {e}"); std::process::exit(1); },
+                Err(e) => { eprintln!("❌ {e}"); std::process::exit(1); }
+            }
+        }
+        "uninstall" => {
+            match install_name(cmd_args, "lyco uninstall [名字]") {
+                Ok(n) => if let Err(e) = manifest::uninstall(n) { eprintln!("❌ {e}"); std::process::exit(1); },
+                Err(e) => { eprintln!("❌ {e}"); std::process::exit(1); }
+            }
+        }
         "bench" => {
             println!("ℹ cargo bench 无直接对应。建议: lyco build -r 后对产物压测;");
             println!("  或把基准程序放 tests/, 用 lyco test 运行。");

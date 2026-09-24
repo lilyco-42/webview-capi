@@ -851,3 +851,96 @@ jobs:
           fi
 
           echo "✅ 参数写错当场说（xmake / Lyco.toml / run 三条路径一致），正确旗标照常生效"
+
+      # `lyco install` 一个命令里有三处说谎：
+      #   ① 帮助写着 `install [名字]`，但 `manifest::install()` 连形参都没有 ——
+      #      `lyco install myapp` 会静默地按 `Lyco.toml` 的项目名装成另一个命令；
+      #   ② 找不到产物时打的是**字面量** `"构建产物未找到 (build/**/<name>.exe)"`，
+      #      `<name>` 会原样打给用户（占位符泄漏），而且后缀本身就是错的；
+      #   ③ `.exe` 在 `find_built_exe` / `install` / `uninstall` 三处写死。xmake 在
+      #      Linux/macOS 上产出的是 `build/<plat>/<arch>/<mode>/<名字>`（**没有**扩展名），
+      #      所以 `lyco install` 在这两个平台上**必然**报「构建产物未找到」，而那句
+      #      错误信息还叫用户去找一个永远不存在的 `.exe`。
+      # 本 job 正好跑在 ubuntu / macos 上 —— ③ 正是这里才抓得到。
+      - name: lyco install 真的能装（Unix 无扩展名产物找得到 / [名字] 生效 / 错误不泄漏占位符）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin"
+
+          # 假 xmake：退出 0，不真编译。产物由下面手动造 —— 断言因此完全不依赖
+          # 「runner 上装没装 xmake」。
+          printf '#!/bin/sh\nexit 0\n' > "$W/bin/xmake"
+          chmod +x "$W/bin/xmake"
+
+          mkdir -p "$W/proj"
+          (cd "$W/proj" && env PATH="$W/bin" "$LYCO" new hello c) > "$W/new" 2>&1
+          # 造一个「已构建好」的产物：**没有扩展名** —— 就是 xmake 在 Unix 上的样子。
+          mkdir -p "$W/proj/hello/build/fake"
+          printf '#!/bin/sh\necho hi\n' > "$W/proj/hello/build/fake/hello"
+          chmod +x "$W/proj/hello/build/fake/hello"
+
+          # ⓪ 判据自检：这份 fixture 里**不存在** hello.exe，而**存在** hello。
+          #    旧判据是「文件名 == <name>.exe」，所以在同一份 fixture 上必然返回
+          #    「未找到」—— 这就是 ③ 的现场，也是下面断言并非空转的证明。
+          if find "$W/proj/hello/build" -name 'hello.exe' | grep -q .; then
+            echo "❌ 自检失败：fixture 里意外存在 hello.exe，下面的断言就证明不了 ③"; exit 1
+          fi
+          find "$W/proj/hello/build" -name 'hello' | grep -q . \
+            || { echo "❌ 自检失败：fixture 没造出无扩展名的产物"; exit 1; }
+
+          # ① 不带参数：必须成功，且装到 ~/.lyco/bin/hello（Unix 上**没有** .exe）
+          out=$(cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" install 2>&1) || {
+            echo "❌ 有产物时 lyco install 却失败了（.exe 是不是又写死了？）"
+            printf '%s\n' "$out"; exit 1; }
+          if [ -e "$HOME/.lyco/bin/hello.exe" ]; then
+            echo "❌ 装成了 hello.exe —— Unix 上不该出现 .exe"; printf '%s\n' "$out"; exit 1
+          fi
+          [ -x "$HOME/.lyco/bin/hello" ] \
+            || { echo "❌ 说成功了，但 ~/.lyco/bin/hello 不在（或不可执行）"; printf '%s\n' "$out"; exit 1; }
+
+          # ② 没有产物：必须失败，错误里要出现**项目名**、不许出现占位符 <name>
+          (cd "$W/proj" && env PATH="$W/bin" "$LYCO" new noprod c) > /dev/null 2>&1
+          if (cd "$W/proj/noprod" && env PATH="$W/bin" "$LYCO" install) > "$W/o2" 2>&1; then
+            echo "❌ 没有任何产物时 lyco install 居然成功了"; cat "$W/o2"; exit 1
+          fi
+          if grep -q '<name>' "$W/o2"; then
+            echo "❌ 错误信息把占位符 <name> 原样打出来了（应写真实项目名）"; cat "$W/o2"; exit 1
+          fi
+          grep -q 'noprod' "$W/o2" || { echo "❌ 失败了，但没说清要找什么"; cat "$W/o2"; exit 1; }
+
+          # ③ `lyco install [名字]`：帮助里承诺的参数必须真的生效
+          rm -f "$HOME/.lyco/bin/hello"
+          (cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" install myapp) > "$W/o3" 2>&1 \
+            || { echo "❌ lyco install myapp 失败了"; cat "$W/o3"; exit 1; }
+          [ -x "$HOME/.lyco/bin/myapp" ] \
+            || { echo "❌ myapp 没被装出来 —— 那个名字参数被咽下去了"; cat "$W/o3"; exit 1; }
+
+          # ④ uninstall 找的必须是同一个文件（两个命令的 [名字] 语义要对齐）
+          (cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" uninstall myapp) > "$W/o4" 2>&1 \
+            || { echo "❌ lyco uninstall myapp 失败了"; cat "$W/o4"; exit 1; }
+          grep -q '已卸载' "$W/o4" || { echo "❌ 没报「已卸载」"; cat "$W/o4"; exit 1; }
+          [ ! -e "$HOME/.lyco/bin/myapp" ] \
+            || { echo "❌ 说已卸载，文件还在"; cat "$W/o4"; exit 1; }
+
+          # ⑤ 判据自检：卸一个不存在的名字必须报「未安装」—— 否则 ④ 是恒真的空检查
+          (cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" uninstall zz-nosuch-app) > "$W/o5" 2>&1 || true
+          grep -q '未安装' "$W/o5" \
+            || { echo "❌ 自检失败：不存在的名字也没报「未安装」，④ 的判据无效"; cat "$W/o5"; exit 1; }
+
+          # ⑥ 写错的旗标不许被当成名字（与 build / run 同一套严格标准）
+          if (cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" install --bogus) > "$W/o6" 2>&1; then
+            echo "❌ lyco install --bogus 居然成功了（把旗标当成了命令名）"; cat "$W/o6"; exit 1
+          fi
+          grep -q '未知参数' "$W/o6" || { echo "❌ 没报未知参数"; cat "$W/o6"; exit 1; }
+
+          # ⑦ 多余的参数不许被咽下去
+          if (cd "$W/proj/hello" && env PATH="$W/bin" "$LYCO" install a b) > "$W/o7" 2>&1; then
+            echo "❌ lyco install a b 居然成功了"; cat "$W/o7"; exit 1
+          fi
+          grep -q '多余的参数' "$W/o7" || { echo "❌ 没报多余的参数"; cat "$W/o7"; exit 1; }
+
+          echo "✅ lyco install 真的能装：Unix 无扩展名产物找得到、[名字] 生效、错误不泄漏占位符、写错的参数当场报"

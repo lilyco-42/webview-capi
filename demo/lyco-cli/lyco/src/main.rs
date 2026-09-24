@@ -821,8 +821,11 @@ fn find_external_cmd(name: &str) -> Option<PathBuf> {
     let dir = commands_dir();
     if !dir.exists() { return None; }
     let ext = if cfg!(windows) { "dll" } else { "so" };
-    for entry in fs::read_dir(&dir).ok()? {
-        let p = entry.ok()?.path();
+    // `flatten()` 跳过读不出来的目录项 —— 原来是 `entry.ok()?`，一个坏项会让
+    // **整个插件发现**失败（表现是「插件明明装了却报未知命令」），而且原因
+    // 完全看不出来。本项目的 `prune_backups` 也是这么处理的。
+    for entry in fs::read_dir(&dir).ok()?.flatten() {
+        let p = entry.path();
         if p.extension().map(|e| e == ext).unwrap_or(false)
             && p.file_stem().map(|s| s == name).unwrap_or(false) {
             return Some(p);
@@ -1143,18 +1146,65 @@ fn find_python() -> Option<(&'static str, &'static [&'static str])> {
     None
 }
 
-/// 起静态服务器托管 `~/.lyco/web/`（阻塞到服务退出）。返回是否真的起来了。
-fn serve_web(py: (&str, &[&str]), port: &str) -> bool {
+/// 等本地端口真的能连上（最多 `tries` × 100ms）。只连 `127.0.0.1` —— 服务就绑在本机。
+///
+/// 为什么要**探测端口**而不是看退出码：`python -m http.server` 在**端口被占用**时
+/// 会立刻退出，而 `status()` 要等进程结束才返回 —— 调用方那时还没拿到任何信息，
+/// 却已经把「打开浏览器访问 http://localhost:8080」打出去了。
+fn wait_port(port: &str, tries: u32) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..tries {
+        // 用 `as_str()` 而不是 `&addr`：`&String` 虽然也实现了 `ToSocketAddrs`，
+        // 但本机不编译，不给类型推导留任何需要细究的余地。
+        if std::net::TcpStream::connect(addr.as_str()).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// 起静态服务器托管 `~/.lyco/web/`，**先确认端口真的能连上**，再把句柄交出去。
+///
+/// 原来这里是 `serve_web(..) -> bool`，用 `status().is_ok()` 判成败 —— 那个判据是错的：
+/// `status()` 返回 `io::Result<ExitStatus>`，`is_ok()` 只说明「进程能启动、并且跑完了」，
+/// **完全没看退出码**。端口被占用时 http.server 立刻以 1 退出，`is_ok()` 照样为真，
+/// 于是「服务已经死了」被报成「起来了」。
+fn spawn_web_server(port: &str) -> Result<std::process::Child, String> {
+    let py = find_python().ok_or_else(web_no_python_hint)?;
     let (exe, pre) = py;
-    let mut args: Vec<&str> = pre.to_vec();
-    args.push("-m");
-    args.push("http.server");
-    args.push(port);
-    Command::new(exe)
-        .args(&args)
+    let mut a: Vec<&str> = pre.to_vec();
+    a.push("-m");
+    a.push("http.server");
+    a.push(port);
+    let mut child = Command::new(exe)
+        .args(&a)
         .current_dir(web_dir())
-        .status()
-        .is_ok()
+        .spawn()
+        .map_err(|e| format!("启动 {exe} 失败: {e}"))?;
+    // 每 100ms 探一次，最多 5 秒。两个提前退出条件：
+    //   * 端口通了 → 成功，把句柄交给调用方（由它决定 wait 还是 kill）；
+    //   * 子进程**已经结束**（端口被占 / 端口非法）→ 立刻失败，不必干等满 5 秒。
+    //     python 自己的报错（如 `OverflowError: port must be 0-65535`）没有被重定向，
+    //     会直接打在终端上，用户看得到根因。
+    for _ in 0..50 {
+        if wait_port(port, 1) {
+            return Ok(child);
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            return Err(web_fail_hint(port));
+        }
+    }
+    let _ = child.kill();
+    Err(web_fail_hint(port))
+}
+
+/// 服务起不来时的**统一提示**。两条失败路径共用同一句话 ——
+/// 这样断言只需要认这一句，不必分别匹配（也就不会漏掉其中一条）。
+fn web_fail_hint(port: &str) -> String {
+    format!(
+        "本地服务器没能起来 (127.0.0.1:{port} 连不上) —— 端口可能被占用或非法, 换一个: PORT=8090 lyco"
+    )
 }
 
 /// 找不到 Python 时的提示：说清「为什么」和「还能怎么办」，别只说失败。
@@ -1166,19 +1216,52 @@ fn web_no_python_hint() -> String {
     )
 }
 
+/// 打开系统浏览器。**失败时说一句** —— 原来两处都是 `let _ = …spawn()`：静默失败，
+/// 而屏幕上刚打过「打开浏览器访问: …」，用户会一直等一个不会来的窗口。
+fn open_browser(url: &str) {
+    #[cfg(windows)]
+    {
+        // 优先 Edge（Windows 10/11 自带）
+        let edge = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ];
+        for p in &edge {
+            if Path::new(p).exists() && Command::new(p).arg(url).spawn().is_ok() {
+                return;
+            }
+        }
+        // 兜底: cmd /c start
+        if Command::new("cmd").args(["/c", "start", "", url]).spawn().is_ok() {
+            return;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if Command::new("xdg-open").arg(url).spawn().is_ok() {
+            return;
+        }
+    }
+    eprintln!("⚠  没能自动打开浏览器, 请手动访问 {url}");
+}
+
 fn cmd_web() {
     ensure_initialized();
     let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
-    // 先确认能起服务，再打印地址 —— 否则用户会去访问一个根本不存在的页面。
-    let Some(py) = find_python() else {
-        eprintln!("{}", web_no_python_hint());
-        std::process::exit(1);
+    // 顺序很重要：**先确认服务真的在监听，再打印地址**。
+    // 原来是反的（先 `println!` 再起服务），判据还是 `status().is_ok()` ——
+    // 端口被占用时用户会拿到一个连不上的地址，然后怀疑是自己的浏览器有问题。
+    let mut child = match spawn_web_server(&port) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
     };
     println!("🌐 http://localhost:{port}  (文件: {})", web_dir().display());
-    if !serve_web(py, &port) {
-        eprintln!("{}", web_no_python_hint());
-        std::process::exit(1);
-    }
+    println!("   按 Ctrl+C 退出");
+    // 阻塞到服务退出（用户 Ctrl+C 时 http.server 收到 SIGINT 结束）。
+    let _ = child.wait();
 }
 
 fn cmd_reset() {
@@ -1348,61 +1431,25 @@ fn main() {
         let port = env::var("PORT").unwrap_or_else(|_| "8080".into());
         let url = format!("http://localhost:{port}");
 
-        // 先确认能起服务，再告诉用户"打开浏览器访问"并真的去开浏览器 ——
-        // 否则用户会被送去一个连不上的地址（原来就是这个行为：找不到 python
-        // 也照样打印地址、照样开浏览器）。
-        let Some(py) = find_python() else {
-            eprintln!("{}", web_no_python_hint());
-            std::process::exit(1);
+        // 起服务并**等它真的在监听**，然后才打印地址、才去开浏览器。
+        // 原来是「spawn 一个后台线程 + 固定 sleep 500ms」—— 端口被占用时
+        // http.server 立刻退出，500ms 后照样打印地址、照样开浏览器，
+        // 用户对着一个连不上的页面发呆，还以为是自己浏览器的问题。
+        let _child = match spawn_web_server(&port) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("❌ {e}");
+                std::process::exit(1);
+            }
         };
 
         println!("🌐 Lyco WebView Studio 启动中...");
         println!("   打开浏览器访问: {url}");
         println!("   按 Ctrl+C 退出");
 
-        // 先启动 HTTP 服务(后台),再打开浏览器
-        let port_clone = port.clone();
-        let web_dir_clone = web_dir();
-        std::thread::spawn(move || {
-            let (exe, pre) = py;
-            let mut a: Vec<&str> = pre.to_vec();
-            a.push("-m");
-            a.push("http.server");
-            a.push(port_clone.as_str());
-            let _ = Command::new(exe).args(&a).current_dir(web_dir_clone).status();
-        });
+        open_browser(&url);
 
-        // 等待服务启动
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // 打开浏览器
-        #[cfg(windows)]
-        {
-            // 尝试 Edge (Windows 10/11 自带)
-            let edge_paths = [
-                "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-                "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-            ];
-            let mut opened = false;
-            for path in &edge_paths {
-                if std::path::Path::new(path).exists() {
-                    if Command::new(path).arg(&url).spawn().is_ok() {
-                        opened = true;
-                        break;
-                    }
-                }
-            }
-            if !opened {
-                // 兜底: cmd /c start
-                let _ = Command::new("cmd").args(["/c", "start", "", &url]).spawn();
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = Command::new("xdg-open").arg(&url).spawn();
-        }
-
-        // 阻塞主线程保持运行
+        // 阻塞主线程保持运行（`_child` 一直被持有，服务随本进程一起退出）
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
@@ -1428,8 +1475,17 @@ fn main() {
             p.with_extension("")
         };
         if exe.exists() {
-            let status = Command::new(&exe).args(cmd_args).status().unwrap();
-            std::process::exit(status.code().unwrap_or(0));
+            // 原来是 `.unwrap()` —— 插件文件在、但没有执行权限（Linux/macOS 上
+            // 把二进制复制过来忘了 `chmod +x` 是常事）会直接 panic，甩一屏
+            // backtrace，而不是告诉用户「为什么跑不起来」。
+            match Command::new(&exe).args(cmd_args).status() {
+                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                Err(e) => {
+                    eprintln!("❌ 无法执行插件 {}: {e}", exe.display());
+                    eprintln!("   Linux/macOS 上先确认它有执行权限: chmod +x {}", exe.display());
+                    std::process::exit(1);
+                }
+            }
         } else {
             // 报完就退出，别再落到下面的 match 里 —— 否则还会把 38 行帮助
             // 当成「未知命令」打出来，而这条命令其实是**已知的、只是装坏了**。

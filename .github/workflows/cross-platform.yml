@@ -770,4 +770,16 @@ jobs:
           printf '%s' "$out" | grep -q 'CMAKE_BUILD_TYPE=Release' \
             || { echo "❌ lyco build -r 没给 cmake 传 -DCMAKE_BUILD_TYPE=Release"; printf '%s\n' "$out"; exit 1; }
 
+          # ⑧ 「xmake 起不来」时不许把真实错误丢掉、换成猜出来的结论。
+          #    原来两条路径都写 `.map_err(|_| "xmake 未安装 (scoop install xmake)")`
+          #    —— PATH 没配 / 没权限 / 目录不对，全都被报成「未安装」，而且
+          #    唯一的线索（真实 io 错误）被抹掉了。统一成 `无法执行 xmake: <真实错误>`。
+          mkdir -p "$W/toml"
+          printf '[package]\nname = "x"\nversion = "0.1.0"\n' > "$W/toml/Lyco.toml"
+          if (cd "$W/toml" && env PATH=/nonexistent "$LYCO" build) > "$W/o8" 2>&1; then
+            echo "❌ xmake 跑不起来时 lyco build 却成功了"; cat "$W/o8"; exit 1
+          fi
+          grep -q '无法执行 xmake' "$W/o8" \
+            || { echo "❌ 没报告「无法执行 xmake」（真实错误被丢掉/换成了猜测）"; cat "$W/o8"; exit 1; }
+
           echo "✅ -r / --target 在 xmake 与 CMake 两条路径上都真的生效（或明确拒绝）"

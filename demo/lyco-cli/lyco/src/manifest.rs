@@ -389,7 +389,11 @@ pub fn xmake_config(release: bool, target_plat: Option<&str>) -> Result<(), Stri
     for a in platform_args(target_plat)? {
         conf.arg(a);
     }
-    let st = conf.status().map_err(|_| "xmake 未安装 (scoop install xmake)")?;
+    // 别把真实的 `io::Error` 丢掉、换成一个**猜出来的结论**：`xmake` 起不来可能
+    // 是 PATH 没配、目录不对、没有执行权限……直接报「未安装」是在替用户下结论，
+    // 而且抹掉了唯一的线索。统一成 `run_step` 那套说法（「无法执行 <命令>: <真实错误>」），
+    // 两条路径（有 `Lyco.toml` / 只有手写 `xmake.lua`）的错误文案也因此一致。
+    let st = conf.status().map_err(|e| format!("无法执行 xmake: {e}"))?;
     if !st.success() { return Err("xmake 配置失败 (缺平台 SDK? 见上方输出)".into()); }
     Ok(())
 }
@@ -400,7 +404,7 @@ pub fn build(release: bool, target_plat: Option<&str>) -> Result<(), String> {
     println!("⚙ 已从 {MANIFEST} 生成 xmake.lua ({} 个依赖)", m.dependencies.len());
     xmake_config(release, target_plat)?;
     let st = Command::new("xmake").args(["-y"]).status()
-        .map_err(|_| "xmake 未安装 (scoop install xmake)")?;
+        .map_err(|e| format!("无法执行 xmake: {e}"))?;
     if !st.success() { return Err("构建失败".into()); }
     Ok(())
 }
@@ -409,7 +413,8 @@ pub fn run(release: bool, target_plat: Option<&str>) -> Result<(), String> {
     let m = Manifest::load()?;
     build(release, target_plat)?;
     println!("▶ 运行 {}...", m.project_name());
-    let st = Command::new("xmake").arg("run").status().map_err(|e| e.to_string())?;
+    let st = Command::new("xmake").arg("run").status()
+        .map_err(|e| format!("无法执行 xmake run: {e}"))?;
     if !st.success() { return Err("运行失败".into()); }
     Ok(())
 }

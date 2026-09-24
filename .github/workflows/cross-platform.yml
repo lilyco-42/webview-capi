@@ -59,6 +59,41 @@ jobs:
           fi
           echo "✅ 扫描 $n 个文件，没有「变量紧跟非 ASCII」的写法"
 
+      # `timeout` 在 ubuntu 上有（coreutils），**在 macOS 上没有** —— 而 workflow 里
+      # 那些 `timeout 15 … "$LYCO" web` 是用来给常驻命令设上限的（少了它整步挂死）。
+      # 更糟的是「命令不存在」这句被 `2>&1` 收进了变量，日志里连一行红字都没有；
+      # 判据若写成「输出里**没有**某句话」，就变成**永远为真**的空检查
+      # （第 16 步 ③ 实测：从 2026-09-23 起在 macOS 上一直是 success，但什么都没查）。
+      # 统一改用 `.github/scripts/run-timed.sh` 里的 `run_timed`。
+      - name: 校验没有裸 `timeout`（macOS 的 runner 上没有它）
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          n=0
+          while IFS= read -r f; do
+            n=$((n + 1))
+            # 只扫会被执行的行（注释跳过）。`timeout-minutes:` 这类 YAML 键不算：
+            # `timeout` 后面紧跟 `-`，不匹配 `timeout[[:space:]]`。
+            hits="$(sed 's/\r$//' "$f" \
+              | grep -nE '(^|[^A-Za-z_-])timeout[[:space:]]+[0-9]' \
+              | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+            if [ -n "$hits" ]; then
+              echo "❌ $f: 用了裸 timeout（macOS 的 runner 上没有它）"
+              echo "$hits" | sed 's/^/    /'
+              bad=1
+            fi
+          done < <(find .github/workflows -name '*.yml'; find .github/scripts -name '*.sh' 2>/dev/null)
+          if [ "$n" -eq 0 ]; then
+            echo "❌ 一个文件都没扫到 —— 检查 find 的路径是否还对"
+            exit 1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "  修法：用 .github/scripts/run-timed.sh 里的 run_timed，并给它配一条自检"
+            exit 1
+          fi
+          echo "✅ 扫描 ${n} 个文件，没有裸 timeout"
+
   lyco-e2e:
     name: lyco 端到端 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -659,6 +694,33 @@ jobs:
           export HOME="$W/home"
           mkdir -p "$HOME" "$W/empty"
 
+          # 便携版 timeout：macOS 的 runner **没有** GNU `timeout`（coreutils 不是系统
+          # 自带）。这里原来写的是裸 `timeout 15 …`，在 macOS 上等于「命令不存在」——
+          # `$LYCO` 根本没被执行，而那句 command not found 被 `2>&1` 收进了变量，
+          # 日志里一行红字都没有。③ 的判据是「输出里**没有**帮助横幅」，命令没跑当然
+          # 也没有横幅 → **这条断言在 macOS 上永远为真**。见 .github/scripts/run-timed.sh。
+          RUN_TIMED="$PWD/.github/scripts/run-timed.sh"
+          [ -f "${RUN_TIMED}" ] || { echo "❌ 缺少 ${RUN_TIMED}"; exit 1; }
+          . "${RUN_TIMED}"
+          command -v run_timed > /dev/null \
+            || { echo "❌ run-timed.sh 没有定义 run_timed"; exit 1; }
+          # 自检：便携版必须**真的执行**命令、**真的会掐掉**它。
+          # 只看「耗时短」是不够的 —— 「什么都没执行就立刻返回」同样很快
+          # （macOS 上 `timeout: command not found` 就是 rc=127、耗时 0s，
+          #  一条只量耗时的自检会放过它，于是又变成一个永远为真的空检查）。
+          t0=$(date +%s)
+          # 注意 rc=0 / || rc=$?：超时返回 137，而本步骤是 set -e ——
+          # 直接写 `run_timed …` 会让脚本在这里就退出（实测：零输出、exit=137）。
+          rc=0
+          run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
+          t1=$(date +%s)
+          [ -f "$W/rtmark" ] \
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=$rc）"; exit 1; }
+          [ "$rc" -ge 128 ] \
+            || { echo "❌ 自检失败：run_timed 返回 $rc（不是被掐掉的 137）"; exit 1; }
+          [ $((t1 - t0)) -lt 15 ] \
+            || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
+
           # 帮助文本：`lyco` 不带参数会去启动 Web UI，所以拿一个不存在的命令触发帮助分支。
           (cd "$W/empty" && "$LYCO" zzz-no-such-command) > "$W/help" 2>&1 || true
           (cd "$W/empty" && "$LYCO" list) > "$W/list" 2>&1 || true
@@ -688,9 +750,17 @@ jobs:
 
           # ③ 帮助里列出的每个命令都必须真的被派发，不能落到帮助分支。
           #    带超时：`web` 是常驻命令，超时本身不算错；**打印了帮助横幅**才是没派发。
+          #
+          #    先证明「同一条调用路径真的把 lyco 跑起来了」：判据是「输出里**没有**横幅」，
+          #    而「命令根本没执行」也会满足它 —— 上面那个 macOS 的坑就是这么来的。
+          #    拿 `list` 试（它必然有输出），跑不起来就说明这条判据无效。
+          probe2=$(run_timed 15 env PATH=/nonexistent PORT=99999 "$LYCO" list 2>&1 </dev/null) || true
+          printf '%s' "$probe2" | grep -q '内置命令:' \
+            || { echo "❌ 自检失败：同一条调用路径没能把 lyco 跑起来，③ 的判据无效"; printf '%s\n' "$probe2"; exit 1; }
+
           undispatched=""
           for c in $help_cmds; do
-            out=$(cd "$W/empty" && timeout 15 env PATH=/nonexistent PORT=99999 "$LYCO" "$c" 2>&1 </dev/null) || true
+            out=$(cd "$W/empty" && run_timed 15 env PATH=/nonexistent PORT=99999 "$LYCO" "$c" 2>&1 </dev/null) || true
             if printf '%s' "$out" | grep -q 'cargo 风格的跨平台 WebView 项目管理器'; then
               undispatched="$undispatched $c"
             fi
@@ -965,6 +1035,31 @@ jobs:
           export HOME="$W/home"
           mkdir -p "$HOME" "$W/bin" "$W/proj"
 
+          # 便携版 timeout —— macOS 的 runner 上没有 GNU `timeout`（实测：
+          # `line N: timeout: command not found`，而它被 `2>&1` 收进了变量里，
+          # 日志里只留下一行看不懂的 ❌）。见 .github/scripts/run-timed.sh。
+          RUN_TIMED="$PWD/.github/scripts/run-timed.sh"
+          [ -f "${RUN_TIMED}" ] || { echo "❌ 缺少 ${RUN_TIMED}"; exit 1; }
+          . "${RUN_TIMED}"
+          command -v run_timed > /dev/null \
+            || { echo "❌ run-timed.sh 没有定义 run_timed"; exit 1; }
+          # 自检：便携版必须**真的执行**命令、**真的会掐掉**它。
+          # 只看「耗时短」是不够的 —— 「什么都没执行就立刻返回」同样很快
+          # （macOS 上 `timeout: command not found` 就是 rc=127、耗时 0s，
+          #  一条只量耗时的自检会放过它，于是又变成一个永远为真的空检查）。
+          t0=$(date +%s)
+          # 注意 rc=0 / || rc=$?：超时返回 137，而本步骤是 set -e ——
+          # 直接写 `run_timed …` 会让脚本在这里就退出（实测：零输出、exit=137）。
+          rc=0
+          run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
+          t1=$(date +%s)
+          [ -f "$W/rtmark" ] \
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=$rc）"; exit 1; }
+          [ "$rc" -ge 128 ] \
+            || { echo "❌ 自检失败：run_timed 返回 $rc（不是被掐掉的 137）"; exit 1; }
+          [ $((t1 - t0)) -lt 15 ] \
+            || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
+
           # 假 xmake：退出 0。断言因此不依赖 runner 上装没装 xmake。
           printf '#!/bin/sh\nexit 0\n' > "$W/bin/xmake"
           chmod +x "$W/bin/xmake"
@@ -973,7 +1068,7 @@ jobs:
           grep -q '已创建' "$W/new" || { echo "❌ 连 fixture 都建不起来"; cat "$W/new"; exit 1; }
 
           # 注意 `web` 是常驻命令 —— 一律带超时；超时不算错（第 16 步同理）。
-          run() { (cd "$W/proj" && timeout 10 env PATH="$W/bin" PORT=19923 "$LYCO" $1 2>&1 </dev/null) || true; }
+          run() { (cd "$W/proj" && run_timed 10 env PATH="$W/bin" PORT=19923 "$LYCO" $1 2>&1 </dev/null) || true; }
 
           # ① 帮助里参数列为空的 11 个命令：带任何参数都必须当场报错。
           #    判据与 build / run / install 一致：`-` 开头 = 未知参数，其余 = 多余的参数。
@@ -1041,7 +1136,7 @@ jobs:
           mkdir -p "$W/tf"
           printf '[package]\nname = "tf"\nversion = "0.1.0"\n' > "$W/tf/Lyco.toml"
           : > "$W/tf/tests"
-          out=$(cd "$W/tf" && timeout 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          out=$(cd "$W/tf" && run_timed 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
           printf '%s' "$out" | grep -q '无法读取 tests/ 目录' \
             || { echo "❌ tests 是文件时没说清是「读不了」"; printf '%s\n' "$out"; exit 1; }
           if printf '%s' "$out" | grep -q '没有 tests/ 目录'; then
@@ -1052,7 +1147,7 @@ jobs:
           #    （修「别猜」不等于把有用的提示一起删掉）。
           mkdir -p "$W/tn"
           printf '[package]\nname = "tn"\nversion = "0.1.0"\n' > "$W/tn/Lyco.toml"
-          out=$(cd "$W/tn" && timeout 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          out=$(cd "$W/tn" && run_timed 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
           printf '%s' "$out" | grep -q '没有 tests/ 目录' \
             || { echo "❌ 真的没有 tests/ 时反而没说「没有 tests/ 目录」"; printf '%s\n' "$out"; exit 1; }
 

@@ -1225,7 +1225,46 @@ fn cmd_doc() {
         eprintln!("❌ {e}");
         std::process::exit(1);
     }
-    println!("✅ 文档输出: docs/api/html/index.html");
+    // 打印的是**从 Doxyfile 里读出来的真实输出路径**，并且确认它真的存在。
+    //
+    // 原来是写死的 `✅ 文档输出: docs/api/html/index.html`，而上面那句
+    // 「📄 已生成默认 Doxyfile (可自行修改)」**明确邀请用户改这个文件**。
+    // 用户把 `OUTPUT_DIRECTORY` 改成 `build/doc` 之后，这句话仍然指着
+    // `docs/api/html/index.html` —— 一个**死地址**，和 §27 那个
+    // 「服务没起来照样给地址」是同一类。
+    //
+    // 实测（修复前）：Doxyfile 里写 `OUTPUT_DIRECTORY = build/doc` 时，
+    // 仍然打印 `✅ 文档输出: docs/api/html/index.html`，而那个目录根本不存在。
+    let index = doxygen_html_index();
+    if index.exists() {
+        println!("✅ 文档输出: {}", index.display());
+    } else {
+        // doxygen 成功了但首页不在预期位置：可能是用户把 `OUTPUT_DIRECTORY`
+        // 指到别处、或把 `GENERATE_HTML` 关了。**不许猜**，如实说。
+        println!("✅ doxygen 已成功, 但没找到 {}", index.display());
+        println!("   (Doxyfile 里的 OUTPUT_DIRECTORY 指到别处了? 或者 GENERATE_HTML = NO?)");
+    }
+}
+
+/// 从 `Doxyfile` 里读出 HTML 首页的真实路径（`<OUTPUT_DIRECTORY>/html/index.html`）。
+///
+/// `Doxyfile` 是**用户可改**的（`lyco doc` 自己就这么说），所以输出路径不能写死。
+/// 只认最朴素的 `KEY = value` 一行；`#` 开头是注释。解析不出来时退回 doxygen
+/// 的默认值 `docs/api`（也就是我们自己生成的那份 Doxyfile 里的值）。
+fn doxygen_html_index() -> PathBuf {
+    let mut dir = "docs/api".to_string();
+    if let Ok(t) = fs::read_to_string("Doxyfile") {
+        for line in t.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some(rest) = line.strip_prefix("OUTPUT_DIRECTORY") {
+                let v = rest.trim_start().trim_start_matches('=').trim();
+                let v = v.trim_matches('"').trim_matches('\'');
+                if !v.is_empty() { dir = v.to_string(); }
+            }
+        }
+    }
+    PathBuf::from(dir).join("html").join("index.html")
 }
 
 // ── 本地静态服务器（`lyco web`） ─────────────────────────────

@@ -1487,6 +1487,12 @@ fn cmd_info() {
         for (name, proj, when) in &inst {
             println!("    {name} ← 项目 {proj} ({})", manifest::day(*when));
         }
+        // 「装到哪了、能不能直接敲」和 `lyco list` 共用同一份实现
+        // （`manifest::path_note()`）。`bin/` 里没东西时它返回 `None`，
+        // 一个字都不说：一个空目录的 PATH 状态跟用户无关，说了只是噪音。
+        if let Some(note) = manifest::path_note() {
+            println!("  PATH: {note}");
+        }
     }
     // 当前目录有清单时，把项目本身也报出来。
     // `Lyco.toml` 的 `version` 字段原来解析了却从来没被读过
@@ -1536,6 +1542,10 @@ fn cmd_list() {
         for (name, proj, when) in &inst {
             println!("  {name:<16} ← 项目 {proj}  ({})", manifest::day(*when));
         }
+    }
+    // 同一件事、同一个函数 —— `lyco info` 与这里必须一个说法（见 cmd_info）。
+    if let Some(note) = manifest::path_note() {
+        println!("  PATH: {note}");
     }
     let dir = commands_dir();
     if let Ok(rd) = fs::read_dir(dir) {

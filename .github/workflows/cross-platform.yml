@@ -59,6 +59,41 @@ jobs:
           fi
           echo "✅ 扫描 $n 个文件，没有「变量紧跟非 ASCII」的写法"
 
+      # `timeout` 在 ubuntu 上有（coreutils），**在 macOS 上没有** —— 而 workflow 里
+      # 那些 `timeout 15 … "$LYCO" web` 是用来给常驻命令设上限的（少了它整步挂死）。
+      # 更糟的是「命令不存在」这句被 `2>&1` 收进了变量，日志里连一行红字都没有；
+      # 判据若写成「输出里**没有**某句话」，就变成**永远为真**的空检查
+      # （第 16 步 ③ 实测：从 2026-09-23 起在 macOS 上一直是 success，但什么都没查）。
+      # 统一改用 `.github/scripts/run-timed.sh` 里的 `run_timed`。
+      - name: 校验没有裸 `timeout`（macOS 的 runner 上没有它）
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=0
+          n=0
+          while IFS= read -r f; do
+            n=$((n + 1))
+            # 只扫会被执行的行（注释跳过）。`timeout-minutes:` 这类 YAML 键不算：
+            # `timeout` 后面紧跟 `-`，不匹配 `timeout[[:space:]]`。
+            hits="$(sed 's/\r$//' "$f" \
+              | grep -nE '(^|[^A-Za-z_-])timeout[[:space:]]+[0-9]' \
+              | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+            if [ -n "$hits" ]; then
+              echo "❌ $f: 用了裸 timeout（macOS 的 runner 上没有它）"
+              echo "$hits" | sed 's/^/    /'
+              bad=1
+            fi
+          done < <(find .github/workflows -name '*.yml'; find .github/scripts -name '*.sh' 2>/dev/null)
+          if [ "$n" -eq 0 ]; then
+            echo "❌ 一个文件都没扫到 —— 检查 find 的路径是否还对"
+            exit 1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "  修法：用 .github/scripts/run-timed.sh 里的 run_timed，并给它配一条自检"
+            exit 1
+          fi
+          echo "✅ 扫描 ${n} 个文件，没有裸 timeout"
+
   lyco-e2e:
     name: lyco 端到端 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -190,7 +225,19 @@ jobs:
             || { echo "❌ 版本戳里没有内容指纹"; exit 1; }
 
           # 幂等：再跑一次不该重复释放。指纹不稳定的话会每次都覆盖用户自定义。
-          if "$LYCO" new demo2 c | grep -q "模板已更新"; then
+          #
+          # ⚠️ 下面这条是「**没有**某句话」型判据 —— 命令没跑起来时它**永远为真**：
+          # 管道没有输出 → grep 失败 → if 不进 → 静默通过。所以先把前提钉死：
+          # 第二次运行必须成功、必须真的建出目录、必须有正常输出。
+          # （同一类问题的第 4 处；第 3 处是上面 ③ 那个 macOS 的 `timeout`。）
+          out2=$("$LYCO" new demo2 c 2>&1) || {
+            echo "❌ 第二次 lyco new 失败了 —— 下面的幂等判据会变成空检查"
+            printf '%s\n' "$out2"; exit 1; }
+          [ -d "$OUT/demo2" ] \
+            || { echo "❌ 自检失败：第二次 lyco new 没建出 demo2，幂等判据无效"; exit 1; }
+          printf '%s' "$out2" | grep -q '已创建' \
+            || { echo "❌ 自检失败：第二次 lyco new 没有正常输出，幂等判据无效"; printf '%s\n' "$out2"; exit 1; }
+          if printf '%s' "$out2" | grep -q "模板已更新"; then
             echo "❌ 第二次仍然重释放 —— 版本戳不稳定"; exit 1
           fi
           echo "✅ 老用户的旧模板被更新，且版本戳稳定（不重复释放）"
@@ -659,6 +706,33 @@ jobs:
           export HOME="$W/home"
           mkdir -p "$HOME" "$W/empty"
 
+          # 便携版 timeout：macOS 的 runner **没有** GNU `timeout`（coreutils 不是系统
+          # 自带）。这里原来写的是裸 `timeout 15 …`，在 macOS 上等于「命令不存在」——
+          # `$LYCO` 根本没被执行，而那句 command not found 被 `2>&1` 收进了变量，
+          # 日志里一行红字都没有。③ 的判据是「输出里**没有**帮助横幅」，命令没跑当然
+          # 也没有横幅 → **这条断言在 macOS 上永远为真**。见 .github/scripts/run-timed.sh。
+          RUN_TIMED="$PWD/.github/scripts/run-timed.sh"
+          [ -f "${RUN_TIMED}" ] || { echo "❌ 缺少 ${RUN_TIMED}"; exit 1; }
+          . "${RUN_TIMED}"
+          command -v run_timed > /dev/null \
+            || { echo "❌ run-timed.sh 没有定义 run_timed"; exit 1; }
+          # 自检：便携版必须**真的执行**命令、**真的会掐掉**它。
+          # 只看「耗时短」是不够的 —— 「什么都没执行就立刻返回」同样很快
+          # （macOS 上 `timeout: command not found` 就是 rc=127、耗时 0s，
+          #  一条只量耗时的自检会放过它，于是又变成一个永远为真的空检查）。
+          t0=$(date +%s)
+          # 注意 rc=0 / || rc=$?：超时返回 137，而本步骤是 set -e ——
+          # 直接写 `run_timed …` 会让脚本在这里就退出（实测：零输出、exit=137）。
+          rc=0
+          run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
+          t1=$(date +%s)
+          [ -f "$W/rtmark" ] \
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=${rc}）"; exit 1; }
+          [ "$rc" -ge 128 ] \
+            || { echo "❌ 自检失败：run_timed 返回 ${rc}（不是被掐掉的 137）"; exit 1; }
+          [ $((t1 - t0)) -lt 15 ] \
+            || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
+
           # 帮助文本：`lyco` 不带参数会去启动 Web UI，所以拿一个不存在的命令触发帮助分支。
           (cd "$W/empty" && "$LYCO" zzz-no-such-command) > "$W/help" 2>&1 || true
           (cd "$W/empty" && "$LYCO" list) > "$W/list" 2>&1 || true
@@ -688,9 +762,17 @@ jobs:
 
           # ③ 帮助里列出的每个命令都必须真的被派发，不能落到帮助分支。
           #    带超时：`web` 是常驻命令，超时本身不算错；**打印了帮助横幅**才是没派发。
+          #
+          #    先证明「同一条调用路径真的把 lyco 跑起来了」：判据是「输出里**没有**横幅」，
+          #    而「命令根本没执行」也会满足它 —— 上面那个 macOS 的坑就是这么来的。
+          #    拿 `list` 试（它必然有输出），跑不起来就说明这条判据无效。
+          probe2=$(run_timed 15 env PATH=/nonexistent PORT=99999 "$LYCO" list 2>&1 </dev/null) || true
+          printf '%s' "$probe2" | grep -q '内置命令:' \
+            || { echo "❌ 自检失败：同一条调用路径没能把 lyco 跑起来，③ 的判据无效"; printf '%s\n' "$probe2"; exit 1; }
+
           undispatched=""
           for c in $help_cmds; do
-            out=$(cd "$W/empty" && timeout 15 env PATH=/nonexistent PORT=99999 "$LYCO" "$c" 2>&1 </dev/null) || true
+            out=$(cd "$W/empty" && run_timed 15 env PATH=/nonexistent PORT=99999 "$LYCO" "$c" 2>&1 </dev/null) || true
             if printf '%s' "$out" | grep -q 'cargo 风格的跨平台 WebView 项目管理器'; then
               undispatched="$undispatched $c"
             fi
@@ -944,3 +1026,141 @@ jobs:
           grep -q '多余的参数' "$W/o7" || { echo "❌ 没报多余的参数"; cat "$W/o7"; exit 1; }
 
           echo "✅ lyco install 真的能装：Unix 无扩展名产物找得到、[名字] 生效、错误不泄漏占位符、写错的参数当场报"
+
+      # 上一步管 `build` / `run` / `install`，这一步管**其余 18 个命令**。
+      #
+      # 原来只有 `new` / `add` / `install` / `uninstall` 会看参数，剩下 15 个命令
+      # **完全不读 `cmd_args`** —— 帮助表里它们的参数列都是空的，却对多出来的参数
+      # 一声不吭。实测（修复前的二进制，HOME 已隔离）：
+      #
+      #   lyco reset --bogus   → rc=0，**真的重置了 ~/.lyco/**，还打印「✅ 已重置」
+      #   lyco clean --bogus   → rc=0
+      #   lyco list --bogus / info --bogus / bench --bogus / publish --bogus → rc=0
+      #
+      # 用户敲错一个字符，拿到的是「看起来成功、其实按默认行为执行」的结果。
+      - name: 每个命令都不许静默吞掉参数（lyco reset --bogus 不许真的重置）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin" "$W/proj"
+
+          # 便携版 timeout —— macOS 的 runner 上没有 GNU `timeout`（实测：
+          # `line N: timeout: command not found`，而它被 `2>&1` 收进了变量里，
+          # 日志里只留下一行看不懂的 ❌）。见 .github/scripts/run-timed.sh。
+          RUN_TIMED="$PWD/.github/scripts/run-timed.sh"
+          [ -f "${RUN_TIMED}" ] || { echo "❌ 缺少 ${RUN_TIMED}"; exit 1; }
+          . "${RUN_TIMED}"
+          command -v run_timed > /dev/null \
+            || { echo "❌ run-timed.sh 没有定义 run_timed"; exit 1; }
+          # 自检：便携版必须**真的执行**命令、**真的会掐掉**它。
+          # 只看「耗时短」是不够的 —— 「什么都没执行就立刻返回」同样很快
+          # （macOS 上 `timeout: command not found` 就是 rc=127、耗时 0s，
+          #  一条只量耗时的自检会放过它，于是又变成一个永远为真的空检查）。
+          t0=$(date +%s)
+          # 注意 rc=0 / || rc=$?：超时返回 137，而本步骤是 set -e ——
+          # 直接写 `run_timed …` 会让脚本在这里就退出（实测：零输出、exit=137）。
+          rc=0
+          run_timed 2 bash -c 'touch "$1"; sleep 30' _ "$W/rtmark" >/dev/null 2>&1 || rc=$?
+          t1=$(date +%s)
+          [ -f "$W/rtmark" ] \
+            || { echo "❌ 自检失败：run_timed 没有真的执行命令（rc=${rc}）"; exit 1; }
+          [ "$rc" -ge 128 ] \
+            || { echo "❌ 自检失败：run_timed 返回 ${rc}（不是被掐掉的 137）"; exit 1; }
+          [ $((t1 - t0)) -lt 15 ] \
+            || { echo "❌ 自检失败：run_timed 没能把 sleep 30 掐掉"; exit 1; }
+
+          # 假 xmake：退出 0。断言因此不依赖 runner 上装没装 xmake。
+          printf '#!/bin/sh\nexit 0\n' > "$W/bin/xmake"
+          chmod +x "$W/bin/xmake"
+
+          (cd "$W/proj" && env PATH="$W/bin" "$LYCO" new demo c) > "$W/new" 2>&1
+          grep -q '已创建' "$W/new" || { echo "❌ 连 fixture 都建不起来"; cat "$W/new"; exit 1; }
+
+          # 注意 `web` 是常驻命令 —— 一律带超时；超时不算错（第 16 步同理）。
+          run() { (cd "$W/proj" && run_timed 10 env PATH="$W/bin" PORT=19923 "$LYCO" $1 2>&1 </dev/null) || true; }
+
+          # ① 帮助里参数列为空的 11 个命令：带任何参数都必须当场报错。
+          #    判据与 build / run / install 一致：`-` 开头 = 未知参数，其余 = 多余的参数。
+          zero="check test doc clean web reset info list bench publish update"
+          for c in $zero; do
+            out=$(run "${c} --bogus")
+            printf '%s' "$out" | grep -q '未知参数' \
+              || { echo "❌ lyco ${c} --bogus 没有报未知参数"; printf '%s\n' "$out"; exit 1; }
+            out=$(run "${c} extra")
+            printf '%s' "$out" | grep -q '多余的参数' \
+              || { echo "❌ lyco ${c} extra 没有报多余的参数"; printf '%s\n' "$out"; exit 1; }
+          done
+
+          # ② 判据自检：**不带参数**时不许出现这两句。没有这一步，① 可能只是
+          #    「凡是调用就报错」的空检查 —— 那比没有检查还危险。
+          for c in $zero; do
+            out=$(run "${c}")
+            if printf '%s' "$out" | grep -q '未知参数\|多余的参数'; then
+              echo "❌ 自检失败：lyco ${c}（不带参数）也报了参数错误，① 的判据无效"
+              printf '%s\n' "$out"; exit 1
+            fi
+          done
+
+          # ③ 真正的危害：`reset --bogus` 曾经**真的执行了重置**并报「✅ 已重置」。
+          #    所以这里不只判退出码，还要判「不许出现执行过的痕迹」。
+          out=$(run "reset --bogus")
+          if printf '%s' "$out" | grep -q '已重置'; then
+            echo "❌ lyco reset --bogus 居然真的执行了重置"; printf '%s\n' "$out"; exit 1
+          fi
+          printf '%s' "$out" | grep -q '未知参数' \
+            || { echo "❌ lyco reset --bogus 没报未知参数"; printf '%s\n' "$out"; exit 1; }
+
+          out=$(run "clean --bogus")
+          printf '%s' "$out" | grep -q '未知参数' \
+            || { echo "❌ lyco clean --bogus 没报未知参数"; printf '%s\n' "$out"; exit 1; }
+
+          # ④ 有上限的命令：多出来的位置参数不许被咽下去。
+          while IFS='|' read -r cmd want; do
+            [ -n "$cmd" ] || continue
+            out=$(run "$cmd")
+            printf '%s' "$out" | grep -q "$want" \
+              || { echo "❌ lyco ${cmd} 没有报「${want}」"; printf '%s\n' "$out"; exit 1; }
+          done <<'CASES'
+          new demo9 c url extra|多余的参数
+          init a b|多余的参数
+          search a b|多余的参数
+          remove a b|多余的参数
+          restore a b|多余的参数
+          CASES
+
+          # ⑤ 判据自检：**正好在上限**的调用必须照常工作（防止 max 写成 len-1，
+          #    把正常用法也一起毙掉）。
+          # 名字刻意避开 ④ 用过的 demo9：旧行为下 ④ 会真的把 demo9 建出来，
+          # 那样 ⑤ 就变成「目录已存在」—— 那是脚本自己的顺序假阳性，不是真问题。
+          out=$(run "new demo9b c")
+          printf '%s' "$out" | grep -q '已创建' \
+            || { echo "❌ 自检失败：lyco new demo9b c（正好 2 个参数）不该失败"; printf '%s\n' "$out"; exit 1; }
+          out=$(run "restore")
+          printf '%s' "$out" | grep -qE '可用备份|没有备份' \
+            || { echo "❌ 自检失败：lyco restore（0 个参数）不该失败"; printf '%s\n' "$out"; exit 1; }
+
+          # ⑥ `tests` 是个**文件**时，`read_dir` 报的是 ENOTDIR —— 不许说成
+          #    「没有 tests/ 目录」（那是把真实错误换成一个猜出来的结论，
+          #    而那句提示会让用户去「放 tests/xxx.c 后重试」，他会发现目录明明在）。
+          mkdir -p "$W/tf"
+          printf '[package]\nname = "tf"\nversion = "0.1.0"\n' > "$W/tf/Lyco.toml"
+          : > "$W/tf/tests"
+          out=$(cd "$W/tf" && run_timed 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          printf '%s' "$out" | grep -q '无法读取 tests/ 目录' \
+            || { echo "❌ tests 是文件时没说清是「读不了」"; printf '%s\n' "$out"; exit 1; }
+          if printf '%s' "$out" | grep -q '没有 tests/ 目录'; then
+            echo "❌ 把「读不了」说成了「没有」"; printf '%s\n' "$out"; exit 1
+          fi
+
+          # ⑦ 判据自检：**真的**没有 `tests/` 时，原来那句友好提示必须保留
+          #    （修「别猜」不等于把有用的提示一起删掉）。
+          mkdir -p "$W/tn"
+          printf '[package]\nname = "tn"\nversion = "0.1.0"\n' > "$W/tn/Lyco.toml"
+          out=$(cd "$W/tn" && run_timed 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          printf '%s' "$out" | grep -q '没有 tests/ 目录' \
+            || { echo "❌ 真的没有 tests/ 时反而没说「没有 tests/ 目录」"; printf '%s\n' "$out"; exit 1; }
+
+          echo "✅ 18 个命令的参数校验统一：写错的旗标 / 多余的位置参数都当场说，正常的调用照常工作"

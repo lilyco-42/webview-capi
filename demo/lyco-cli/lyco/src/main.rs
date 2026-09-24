@@ -936,20 +936,35 @@ fn parse_build_flags(cmd_args: &[String]) -> Result<(bool, Option<String>), Stri
     Ok((release, target))
 }
 
-/// 解析 `install` / `uninstall` 的可选名字参数。
+/// 校验「这个命令最多接受 `max` 个位置参数，且不接受任何旗标」。
 ///
-/// 两个命令在帮助里都写作 `[名字]`，所以判据必须一样：
-///   * 不带参数 → `None`（由 `manifest` 侧退回「当前项目的名字」）；
-///   * 一个不以 `-` 开头的参数 → 就是那个名字；
-///   * 一个以 `-` 开头的参数 → **不是名字**，是写错的旗标，当场报错
-///     （`lyco install --help` 不该去装一个叫 `--help` 的命令）；
-///   * 多于一个 → 多余的参数，当场报错，而不是挑第一个用、把其余咽下去。
-fn install_name<'a>(cmd_args: &'a [String], usage: &str) -> Result<Option<&'a str>, String> {
-    match cmd_args.len() {
-        0 => Ok(None),
-        1 if !cmd_args[0].starts_with('-') => Ok(Some(cmd_args[0].as_str())),
-        1 => Err(format!("未知参数: {}  (用法: {usage})", cmd_args[0])),
-        _ => Err(format!("多余的参数: {}  (用法: {usage})", cmd_args[1..].join(" "))),
+/// 判据只有这一处，所以 20 个命令的行为必然一致：
+///   * 出现以 `-` 开头的参数 → **未知参数**（`lyco list --bogus` 里的 `--bogus`
+///     不是列表名，是敲错的旗标；报「未知参数」比按默认行为跑完更有用）；
+///   * 位置参数多于 `max` 个 → **多余的参数**（挑前几个用、把其余咽下去是最坏的）。
+///
+/// 返回位置参数切片（长度 ≤ `max`），调用方直接取自己需要的下标。
+fn positional<'a>(cmd_args: &'a [String], max: usize, usage: &str) -> Result<&'a [String], String> {
+    if let Some(a) = cmd_args.iter().find(|a| a.starts_with('-')) {
+        return Err(format!("未知参数: {a}  (用法: {usage})"));
+    }
+    if cmd_args.len() > max {
+        return Err(format!("多余的参数: {}  (用法: {usage})", cmd_args[max..].join(" ")));
+    }
+    Ok(cmd_args)
+}
+
+/// `positional` 的「要么过、要么当场退出」版本。
+///
+/// 派发表里有 20 个分支，全都只需要「通过了就继续」；让每个分支各写一遍
+/// `match … Err(e) => eprintln! + exit(1)` 既啰嗦又容易漏掉一个。
+fn require_args<'a>(cmd_args: &'a [String], max: usize, usage: &str) -> &'a [String] {
+    match positional(cmd_args, max, usage) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -1629,19 +1644,45 @@ fn main() {
         }
     }
 
+    // 每个分支的第一件事都是**校验参数**（`require_args`），判据只有一处。
+    //
+    // 原来只有 `new` / `add` / `install` / `uninstall` 看参数，其余 15 个命令
+    // **完全不读 `cmd_args`** —— 帮助表里它们的参数列都是空的，却对多出来的参数
+    // 一声不吭。实测（修复前的二进制）：
+    //
+    //   lyco reset --bogus   → rc=0，**真的重置了 ~/.lyco/**，还打印「✅ 已重置」
+    //   lyco clean --bogus   → rc=0
+    //   lyco list --bogus / info --bogus / bench --bogus / publish --bogus → rc=0
+    //
+    // 用户敲错一个字符，拿到的是「看起来成功、其实按默认行为执行」的结果 ——
+    // 与 §26 的「编译失败报成功」是同一类：**把用户明确说出来的东西咽下去**。
     match cmd {
         "new" => {
-            if cmd_args.len() < 2 { eprintln!("用法: lyco new <name> <lang> [url]"); std::process::exit(1); }
-            let url = cmd_args.get(2).map(|s| s.as_str()).unwrap_or("https://example.com");
-            cmd_new(&cmd_args[0], url, &cmd_args[1]);
+            let a = require_args(cmd_args, 3, "lyco new <name> <lang> [url]");
+            if a.len() < 2 { eprintln!("用法: lyco new <name> <lang> [url]"); std::process::exit(1); }
+            let url = a.get(2).map(|s| s.as_str()).unwrap_or("https://example.com");
+            cmd_new(&a[0], url, &a[1]);
         }
         "build" | "b" => cmd_build(cmd_args),
         "run"   | "r" => cmd_run(cmd_args),
-        "check" | "c" => if let Err(e) = manifest::check() { eprintln!("❌ {e}"); std::process::exit(1); },
-        "test"  | "t" => if let Err(e) = manifest::test() { eprintln!("❌ {e}"); std::process::exit(1); },
-        "doc"   | "d" => cmd_doc(),
-        "init"  => cmd_init(cmd_args.first().map(|s| s.as_str())),
+        "check" | "c" => {
+            require_args(cmd_args, 0, "lyco check");
+            if let Err(e) = manifest::check() { eprintln!("❌ {e}"); std::process::exit(1); }
+        }
+        "test"  | "t" => {
+            require_args(cmd_args, 0, "lyco test");
+            if let Err(e) = manifest::test() { eprintln!("❌ {e}"); std::process::exit(1); }
+        }
+        "doc"   | "d" => {
+            require_args(cmd_args, 0, "lyco doc");
+            cmd_doc();
+        }
+        "init"  => {
+            let a = require_args(cmd_args, 1, "lyco init [name]");
+            cmd_init(a.first().map(|s| s.as_str()));
+        }
         "update" => {
+            require_args(cmd_args, 0, "lyco update");
             println!("⬆ 更新包仓库 (xmake repo -u) ...");
             // 原来失败时**什么都不打印**、退出码还是 0 —— 用户以为已经更新过了。
             let mut c = Command::new("xmake");
@@ -1652,43 +1693,68 @@ fn main() {
             }
             println!("✅ 已更新");
         },
-        "search" => manifest::search(cmd_args.first().map(|s| s.as_str()).unwrap_or("")),
+        "search" => {
+            let a = require_args(cmd_args, 1, "lyco search [关键词]");
+            manifest::search(a.first().map(|s| s.as_str()).unwrap_or(""));
+        }
         // 帮助里写的是 `lyco install [名字]`，但 `manifest::install()` 原来连
         // 形参都没有 —— 那个参数从来没被读过，`lyco install myapp` 会静默地
-        // 按项目名装成别的名字。这里把它变成真的，同时**不再把写错的参数当名字
-        // 收下**（与 `build` / `run` 的严格校验同一套标准）。
+        // 按项目名装成别的名字。现在它真的生效，且与 `uninstall [名字]` 对称。
         "install" => {
-            match install_name(cmd_args, "lyco install [名字]") {
-                Ok(n) => if let Err(e) = manifest::install(n) { eprintln!("❌ {e}"); std::process::exit(1); },
-                Err(e) => { eprintln!("❌ {e}"); std::process::exit(1); }
+            let a = require_args(cmd_args, 1, "lyco install [名字]");
+            if let Err(e) = manifest::install(a.first().map(|s| s.as_str())) {
+                eprintln!("❌ {e}");
+                std::process::exit(1);
             }
         }
         "uninstall" => {
-            match install_name(cmd_args, "lyco uninstall [名字]") {
-                Ok(n) => if let Err(e) = manifest::uninstall(n) { eprintln!("❌ {e}"); std::process::exit(1); },
-                Err(e) => { eprintln!("❌ {e}"); std::process::exit(1); }
+            let a = require_args(cmd_args, 1, "lyco uninstall [名字]");
+            if let Err(e) = manifest::uninstall(a.first().map(|s| s.as_str())) {
+                eprintln!("❌ {e}");
+                std::process::exit(1);
             }
         }
         "bench" => {
+            require_args(cmd_args, 0, "lyco bench");
             println!("ℹ cargo bench 无直接对应。建议: lyco build -r 后对产物压测;");
             println!("  或把基准程序放 tests/, 用 lyco test 运行。");
         }
         "publish" => {
+            require_args(cmd_args, 0, "lyco publish");
             println!("ℹ 未实现 (roadmap): git tag v<Lyco.toml version> + gh release 上传构建产物");
         }
         "add" => {
             cmd_add(cmd_args);
         }
         "remove" => {
-            if cmd_args.is_empty() { eprintln!("用法: lyco remove <dep>"); std::process::exit(1); }
-            cmd_remove(&cmd_args[0]);
+            let a = require_args(cmd_args, 1, "lyco remove <dep>");
+            if a.is_empty() { eprintln!("用法: lyco remove <dep>"); std::process::exit(1); }
+            cmd_remove(&a[0]);
         }
-        "clean" => cmd_clean(),
-        "web"   => cmd_web(),
-        "reset" => cmd_reset(),
-        "restore" => cmd_restore(cmd_args),
-        "info"  => cmd_info(),
-        "list"  => cmd_list(),
+        "clean" => {
+            require_args(cmd_args, 0, "lyco clean");
+            cmd_clean();
+        }
+        "web"   => {
+            require_args(cmd_args, 0, "lyco web");
+            cmd_web();
+        }
+        "reset" => {
+            require_args(cmd_args, 0, "lyco reset");
+            cmd_reset();
+        }
+        "restore" => {
+            let a = require_args(cmd_args, 1, "lyco restore [名字]");
+            cmd_restore(a);
+        }
+        "info"  => {
+            require_args(cmd_args, 0, "lyco info");
+            cmd_info();
+        }
+        "list"  => {
+            require_args(cmd_args, 0, "lyco list");
+            cmd_list();
+        }
         _ => { print_help(); std::process::exit(1); }
     }
 }

@@ -649,3 +649,55 @@ jobs:
             || { echo "❌ 没说明插件为什么跑不起来"; printf '%s\n' "$out"; exit 1; }
 
           echo "✅ 服务起不来时不给死地址、插件跑不起来时给人话（不 panic）"
+
+      - name: 帮助文本 / lyco list / 实际派发 三者必须一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/empty"
+
+          # 帮助文本：`lyco` 不带参数会去启动 Web UI，所以拿一个不存在的命令触发帮助分支。
+          (cd "$W/empty" && "$LYCO" zzz-no-such-command) > "$W/help" 2>&1 || true
+          (cd "$W/empty" && "$LYCO" list) > "$W/list" 2>&1 || true
+
+          # 帮助里的命令清单：取「命令:」到空行之间的行，形如 "  new <args>   描述"。
+          # 旧版把两个命令挤在一行（"install / uninstall [name]"），所以拆开再比。
+          help_cmds=$(sed -n '/^命令:$/,/^$/p' "$W/help" | tail -n +2 \
+            | sed -E 's|^  ([a-z]+)( / ([a-z]+))?.*|\1 \3|' \
+            | tr ' ' '\n' | grep -v '^$' | sort -u)
+          list_cmds=$(grep '^内置命令:' "$W/list" | sed 's/^内置命令: //' \
+            | tr ' ' '\n' | grep -v '^$' | sort -u)
+
+          # ① 帮助必须列出 `lyco list` 打出来的每一个命令。
+          #    `bench` / `publish` 曾经只进了 list、没进帮助 —— 照着帮助学命令的人
+          #    永远发现不了它们存在。这两份清单现在同源（COMMANDS 表），这里是防回归。
+          missing=""
+          for c in $list_cmds; do
+            printf '%s\n' "$help_cmds" | grep -qx "$c" || missing="$missing $c"
+          done
+          [ -z "$missing" ] || { echo "❌ 帮助里没有列出:$missing"; cat "$W/help"; exit 1; }
+
+          # ② 自检判据本身有效：一个真不存在的命令**必须**打印帮助横幅。
+          #    否则 ② 就成了永远为真的空检查（这类检查比没有还危险）。
+          probe=$(cd "$W/empty" && env PATH=/nonexistent PORT=99999 "$LYCO" zzzbogus 2>&1 </dev/null) || true
+          printf '%s' "$probe" | grep -q 'cargo 风格的跨平台 WebView 项目管理器' \
+            || { echo "❌ 自检失败：未派发时应打印帮助横幅却没打印，② 的判据无效"; exit 1; }
+
+          # ③ 帮助里列出的每个命令都必须真的被派发，不能落到帮助分支。
+          #    带超时：`web` 是常驻命令，超时本身不算错；**打印了帮助横幅**才是没派发。
+          undispatched=""
+          for c in $help_cmds; do
+            out=$(cd "$W/empty" && timeout 15 env PATH=/nonexistent PORT=99999 "$LYCO" "$c" 2>&1 </dev/null) || true
+            if printf '%s' "$out" | grep -q 'cargo 风格的跨平台 WebView 项目管理器'; then
+              undispatched="$undispatched $c"
+            fi
+          done
+          [ -z "$undispatched" ] || { echo "❌ 帮助里列了、实际没派发:$undispatched"; exit 1; }
+
+          # ④ 别名说明必须在（b/c/r/t/d）—— 帮助里丢了它，用户就不知道有简写。
+          grep -q 'b/c/r/t/d' "$W/help" || { echo "❌ 帮助里丢了别名说明"; exit 1; }
+
+          echo "✅ 帮助文本 / lyco list / 实际派发三者一致（$(printf '%s\n' "$list_cmds" | grep -c .) 个命令）"

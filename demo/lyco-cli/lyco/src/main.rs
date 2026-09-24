@@ -1357,7 +1357,9 @@ fn cmd_list() {
         println!();
     }
 
-    println!("内置命令: new init add remove build check run test doc search update install uninstall clean web reset restore info list bench publish");
+    // 从 COMMANDS 生成，别再手写第二份清单 —— 见 COMMANDS 的注释。
+    let names: Vec<&str> = COMMANDS.iter().map(|(n, _, _)| *n).collect();
+    println!("内置命令: {}", names.join(" "));
     let dir = commands_dir();
     if let Ok(rd) = fs::read_dir(dir) {
         let ext = if cfg!(windows) { "dll" } else { "so" };
@@ -1371,6 +1373,37 @@ fn cmd_list() {
     }
 }
 
+/// 命令表 —— **`print_help` 与 `cmd_list` 的唯一真相来源**。
+///
+/// 以前这两处各手写了一份命令清单（第三份是 `main()` 里的 `match cmd` 派发），
+/// 于是 `bench` / `publish` 只加进了 `list`、忘了加进帮助：照着 `lyco --help`
+/// 学命令的人永远发现不了这两个命令存在。现在两边都从这张表生成。
+///
+/// 三元组是 `(命令, 参数, 说明)`；参数为空串表示不带参数。
+const COMMANDS: &[(&str, &str, &str)] = &[
+    ("new",       "<name> <lang> [url]",          "新建项目 (含 Lyco.toml)"),
+    ("init",      "[name]",                       "在现有目录初始化清单"),
+    ("add",       "<dep>[@<ver>] [--git|--path]", "添加依赖 (例: lyco add webview-capi@1.0)"),
+    ("remove",    "<dep>",                        "移除依赖 (保留注释与格式)"),
+    ("build",     "[-r] [--target <plat>]",       "构建 (-r = release; 默认 debug)"),
+    ("check",     "",                             "语法检查 (不产出目标文件)"),
+    ("run",       "[-r] [--target <plat>]",       "构建 + 运行"),
+    ("test",      "",                             "运行 tests/*.c (每个文件一个测试)"),
+    ("doc",       "",                             "生成文档 (需 doxygen)"),
+    ("search",    "[关键词]",                     "搜索依赖注册表"),
+    ("update",    "",                             "更新包仓库 (xmake repo -u)"),
+    ("install",   "[name]",                       "构建并安装到 ~/.lyco/bin"),
+    ("uninstall", "[name]",                       "从 ~/.lyco/bin 卸载"),
+    ("clean",     "",                             "清除构建产物"),
+    ("web",       "",                             "可视化 Web UI (纯静态预览页, 需 python3/python)"),
+    ("reset",     "",                             "重置 ~/.lyco/ (模板备份会保留, 见下)"),
+    ("restore",   "[名字]",                       "列出模板备份 / 把某一份放回去 (lyco restore)"),
+    ("info",      "",                             "配置信息 (含当前项目)"),
+    ("list",      "",                             "已注册项目 + 命令列表"),
+    ("bench",     "",                             "基准测试说明 (cargo bench 无直接对应)"),
+    ("publish",   "",                             "发布 (未实现, roadmap: git tag + gh release)"),
+];
+
 fn print_help() {
     // 版本号从 Cargo.toml 取（`env!(CARGO_PKG_VERSION)`），别写死 ——
     // 写死的版本号一定会过期，而且同一个文件里 `ensure_initialized` 的
@@ -1380,24 +1413,19 @@ fn print_help() {
 用法: lyco <command> [args]        (b/c/r/t/d 为 build/check/run/test/doc 别名)
 
 命令:
-  new <name> <lang> [url]       新建项目 (含 Lyco.toml)
-  init [name]                   在现有目录初始化清单
-  add <dep>[@<ver>] [--git|--path]  添加依赖 (例: lyco add webview-capi@1.0)
-  remove <dep>                  移除依赖 (保留注释与格式)
-  build [-r] [--target <plat>]  构建 (-r = release; 默认 debug)
-  check                         语法检查 (不产出目标文件)
-  run [-r] [--target <plat>]    构建 + 运行
-  test                          运行 tests/*.c (每个文件一个测试)
-  doc                           生成文档 (需 doxygen)
-  search [关键词]               搜索依赖注册表
-  update                        更新包仓库 (xmake repo -u)
-  install / uninstall [name]    构建并安装到 ~/.lyco/bin / 卸载
-  clean                         清除构建产物
-  web                           可视化 Web UI (纯静态预览页, 需 python3/python)
-  reset                         重置 ~/.lyco/ (模板备份会保留, 见下)
-  restore [名字]                列出模板备份 / 把某一份放回去 (lyco restore)
-  info / list                   配置信息(含当前项目) / 已注册项目 + 命令列表
-
+"#));
+    // 命令列表由 COMMANDS 生成，不再手写 —— 这是 `bench` / `publish` 曾经
+    // 只在 `lyco list` 里出现、在帮助里凭空消失的根因。
+    for (name, args, desc) in COMMANDS {
+        let head = if args.is_empty() {
+            (*name).to_string()
+        } else {
+            format!("{name} {args}")
+        };
+        println!("  {head:<30} {desc}");
+    }
+    // 下面这段没有实参，`{{` / `}}` 各输出一个花括号（TOML 示例要字面量）。
+    print!(r#"
 平台 (--target): windows / mingw / linux / macos / android / ios / wasm
 
 Lyco.toml (与 Cargo.toml 同风格):
@@ -1411,15 +1439,17 @@ Lyco.toml (与 Cargo.toml 同风格):
   mypkg = {{ git = "https://…/repo.git" }} # 从 git 包仓库取 (也可 path = "../repo")
 
 语言: c, python, typescript, rust, go, java, zig, c#, e(易语言)
-插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}
-模板: 编辑 ~/.lyco/templates/ 定制 (升级时只覆盖你没改过的, 改动会被保留)
-备份: 被覆盖掉的原内容存在 ~/.lyco/backup/<版本戳>/ (镜像 ~/.lyco/ 的结构,
-      所以 cp -r 也能放回去); lyco restore 列出可用备份, lyco restore <版本戳> 恢复。
-      只保留最近 10 份 (全部保留设 LYCO_BACKUP_KEEP=0)
-"#),
+"#);
+    println!(
+        "插件: 在 ~/.lyco/commands/ 放 <名>.{} (作为标记) + 同名的可执行文件 <名>{}",
         if cfg!(windows) { "dll" } else { "so" },
         if cfg!(windows) { ".exe" } else { "" }
     );
+    print!(r#"模板: 编辑 ~/.lyco/templates/ 定制 (升级时只覆盖你没改过的, 改动会被保留)
+备份: 被覆盖掉的原内容存在 ~/.lyco/backup/<版本戳>/ (镜像 ~/.lyco/ 的结构,
+      所以 cp -r 也能放回去); lyco restore 列出可用备份, lyco restore <版本戳> 恢复。
+      只保留最近 10 份 (全部保留设 LYCO_BACKUP_KEEP=0)
+"#);
 }
 
 fn main() {

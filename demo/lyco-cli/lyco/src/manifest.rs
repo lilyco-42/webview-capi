@@ -289,18 +289,16 @@ pub fn gen_xmake_lua(m: &Manifest) -> Result<(), String> {
     s.push_str("    if is_mode(\"release\") then set_optimize(\"smallest\") end\ntarget_end()\n");
 
     // tests/*.c → 独立测试 target (lyco test 驱动, 不参与默认构建)
-    if let Ok(rd) = fs::read_dir("tests") {
-        for e in rd.filter_map(|e| e.ok()).collect::<Vec<_>>() {
-            let p = e.path();
-            if !matches!(p.extension().and_then(|x| x.to_str()), Some("c") | Some("cpp")) { continue; }
-            let stem = p.file_stem().unwrap().to_string_lossy();
-            let fname = p.file_name().unwrap().to_string_lossy();
-            s.push_str(&format!(
-                "\ntarget(\"test_{stem}\")\n    set_kind(\"binary\")\n    set_default(false)\n    add_files(\"tests/{fname}\")\n    add_includedirs(\".\", \"src\")\n"
-            ));
-            s.push_str(&deps_block);
-            s.push_str("target_end()\n");
-        }
+    //
+    // target 名由 `test_sources()` 决定 —— 与 `test()` 里决定「跑哪个 target」
+    // 用的是**同一个函数**。命名规则抄两遍的话，哪天改了一处，另一处就会静默地
+    // 「找不到 target」或「跑错 target」。
+    for (target, fname) in test_sources() {
+        s.push_str(&format!(
+            "\ntarget(\"{target}\")\n    set_kind(\"binary\")\n    set_default(false)\n    add_files(\"tests/{fname}\")\n    add_includedirs(\".\", \"src\")\n"
+        ));
+        s.push_str(&deps_block);
+        s.push_str("target_end()\n");
     }
     fs::write("xmake.lua", s).map_err(|e| e.to_string())
 }
@@ -573,31 +571,97 @@ pub fn test() -> Result<(), String> {
     // 权限、或者 `tests` 是个**文件**（`read_dir` 会报 ENOTDIR），都会被说成
     // 「没有 tests/ 目录」，而那句提示让用户去「放 tests/xxx.c 后重试」——
     // 他会照做，然后发现目录明明在。现在只有 `NotFound` 才说「没有」。
-    let rd = match fs::read_dir("tests") {
-        Ok(rd) => rd,
+    match fs::read_dir("tests") {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err("没有 tests/ 目录 (放 tests/xxx.c 后重试)".into());
         }
         Err(e) => return Err(format!("无法读取 tests/ 目录: {e}")),
-    };
+    }
+
+    // 要跑哪些 target，由 `test_sources()` 决定 —— 与 `gen_xmake_lua` 写进
+    // `xmake.lua` 的那一份必然一致（撞名时的 `_<扩展名>` 后缀也是同一处算的）。
+    let sources = test_sources();
+    if sources.is_empty() { return Err("tests/ 下没有 .c/.cpp 测试文件".into()); }
+
     let mut ran = 0;
     let mut failed = 0;
-    for e in rd.filter_map(|e| e.ok()) {
-        let p = e.path();
-        if !matches!(p.extension().and_then(|x| x.to_str()), Some("c") | Some("cpp")) { continue; }
-        let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
-        println!("▶ 运行测试 {stem} ...");
-        let st = Command::new("xmake").args(["run", &format!("test_{stem}")]).status();
+    for (target, fname) in &sources {
+        // 把 **target 名**也打出来 —— 撞名消歧之后，用户能看出
+        // `a.c` 与 `a.cpp` 跑的是两个不同的 target，而不是同一个。
+        println!("▶ 运行测试 {fname} ({target}) ...");
+        // 这里用 `?` 而不是 `_ => 算失败`：xmake **起不来**（没装 / 没执行权限 /
+        // PATH 不对）不是「测试失败」。原来这一支被 `_` 吞掉，真实错误
+        // （`program not found`）一个字都不打印，用户看到的是
+        // 「3/3 个测试失败」，然后去翻自己的测试代码。
+        // 全仓其它调用点都是「无法执行 <命令>: <真实错误>」，这里跟上。
+        let st = Command::new("xmake").args(["run", target.as_str()]).status()
+            .map_err(|e| format!("无法执行 xmake run {target}: {e}"))?;
+        // 只有**真的跑起来了**才计数。`ran` 原来在 `match` 之前无条件 `+= 1`，
+        // 连「压根没执行」也算进去 —— `{failed}/{ran}` 里的分母于是是假的。
         ran += 1;
-        match st {
-            Ok(s) if s.success() => println!("✔ {stem}"),
-            _ => { println!("✘ {stem}"); failed += 1; }
+        if st.success() {
+            println!("✔ {fname}");
+        } else {
+            println!("✘ {fname}");
+            failed += 1;
         }
     }
-    if ran == 0 { return Err("tests/ 下没有 .c/.cpp 测试文件".into()); }
     if failed > 0 { return Err(format!("{failed}/{ran} 个测试失败")); }
     println!("✅ {ran} 个测试全部通过");
     Ok(())
+}
+
+/// `tests/` 下的测试源文件 → `(target 名, 文件名)`，按文件名排序。
+///
+/// **命名规则只有这一份**：`gen_xmake_lua` 用它生成 `xmake.lua` 里的 `test_*`
+/// target，`test()` 用它决定跑哪个 target。两处各写一遍的话，哪天改了一处，
+/// 另一处就会静默地「找不到 target」或「跑错 target」。
+///
+/// 同名不同扩展（`tests/a.c` + `tests/a.cpp`）会撞成同一个 `test_a`。
+/// 实测（修复前，`tests/` 里有 `a.c` / `a.cpp` / `b.c`）：
+/// 生成的 `xmake.lua` 里出现**两个** `target("test_a")`，而 `lyco test`
+/// 把两个文件都算成「跑过了」，最后打印
+///
+///     ▶ 运行测试 a ...        ← a.c
+///     ▶ 运行测试 a ...        ← a.cpp，跑的却是**同一个** target
+///     ✅ 3 个测试全部通过
+///
+/// —— 其中 `a.cpp` **一次都没被编译**。所以撞名时带上扩展名区分
+/// （`test_a_c` / `test_a_cpp`）。
+fn test_sources() -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    if let Ok(rd) = fs::read_dir("tests") {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            // 目录名恰好像源文件（`tests/x.cpp/`）不算测试文件 —— `read_dir`
+            // 会把它也列出来，`extension()` 同样是 `cpp`。
+            if !p.is_file() { continue; }
+            let ext = match p.extension().and_then(|x| x.to_str()) {
+                Some(x) if x == "c" || x == "cpp" => x.to_string(),
+                _ => continue,
+            };
+            let stem = match p.file_stem().and_then(|x| x.to_str()) {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => continue,
+            };
+            files.push((stem, ext));
+        }
+    }
+    // `read_dir` 的顺序是**任意**的 —— 不排序的话生成结果不确定（同一份
+    // `tests/` 两次构建可能得到不同的 target 名），而撞名消歧又依赖「谁先谁后」。
+    files.sort();
+    let mut out = Vec::new();
+    for (stem, ext) in &files {
+        let dup = files.iter().filter(|(s, _)| s == stem).count() > 1;
+        let target = if dup {
+            format!("test_{stem}_{ext}")
+        } else {
+            format!("test_{stem}")
+        };
+        out.push((target, format!("{stem}.{ext}")));
+    }
+    out
 }
 
 // ── install / uninstall: 构建并安装到 ~/.lyco/bin ───────────

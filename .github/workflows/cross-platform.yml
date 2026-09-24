@@ -94,6 +94,53 @@ jobs:
           fi
           echo "✅ 扫描 ${n} 个文件，没有裸 timeout"
 
+      # 正断言有两种写法：「grep -q <pat> <文件>」和「printf '%s' "$var" | grep -q <pat>」。
+      # 后者一旦把**文件路径**当成内容（`printf '%s' "$W/o2"` —— 而 `$W/o2` 是上面刚用
+      # `> "$W/o2"` 重定向写出来的**文件**），grep 就永远匹配不上。
+      # 2026-09-24 第 21 步真实踩到：这一步会**永远变红**（可见，但白烧一轮 CI）；
+      # 更坏的情况是它被写成「没有某句话」型判据 —— 那就变成永远为真、静默失效。
+      - name: 校验没有把「文件路径」当内容 grep
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 自检：这条判据是「**没有**某句话」型，必须证明那句话**有机会被匹配到**，
+          # 否则正则哪天写错了（比如把 `[$]` 写成 `$`）也永远是 ✅。
+          #
+          # 探针**故意**不写成 heredoc / 不直接写死坏行：源文件里写成 `\"\$PROBE/o2\"`，
+          # 落到探针文件里才是 `"$PROBE/o2"` —— 这样这条 lint **不会把自己判红**
+          # （源文件里 `"` 后面跟的是 `[`，不匹配正则）。
+          probe_file="$(mktemp)"
+          printf "%s\n" "printf '%s' \"\$PROBE/o2\" | grep -q x" > "$probe_file"
+          got="$(grep -cE "printf +'%s' +\"[$][A-Za-z_][A-Za-z0-9_]*/" "$probe_file" || true)"
+          rm -f "$probe_file"
+          if [ "$got" -ne 1 ]; then
+            echo "❌ 自检失败：这条正则匹配不到已知的坏写法（got=${got}）—— 判据无效"
+            exit 1
+          fi
+
+          bad=0
+          n=0
+          while IFS= read -r f; do
+            n=$((n + 1))
+            hits="$(sed 's/\r$//' "$f" \
+              | grep -nE "printf +'%s' +\"[$][A-Za-z_][A-Za-z0-9_]*/" \
+              | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+            if [ -n "$hits" ]; then
+              echo "❌ $f: 把文件路径当内容 grep（\"\$VAR/…\" 是路径，不是内容）"
+              echo "$hits" | sed 's/^/    /'
+              bad=1
+            fi
+          done < <(find .github/workflows -name '*.yml')
+          if [ "$n" -eq 0 ]; then
+            echo "❌ 一个文件都没扫到 —— 检查 find 的路径是否还对"
+            exit 1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "  修法：直接 grep 文件（grep -q <pat> \"\$文件\"），或 grep 变量的内容"
+            exit 1
+          fi
+          echo "✅ 扫描 ${n} 个文件，没有把路径当内容 grep"
+
   lyco-e2e:
     name: lyco 端到端 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -1164,3 +1211,206 @@ jobs:
             || { echo "❌ 真的没有 tests/ 时反而没说「没有 tests/ 目录」"; printf '%s\n' "$out"; exit 1; }
 
           echo "✅ 18 个命令的参数校验统一：写错的旗标 / 多余的位置参数都当场说，正常的调用照常工作"
+
+      # `tests/` 下同名的两个文件（`a.c` + `a.cpp`）会撞成同一个 target 名
+      # `test_a`。实测（修复前，tests/ 里放 a.c / a.cpp / b.c）：
+      #
+      #     ⚙ 已从 Lyco.toml 生成 xmake.lua (0 个依赖)
+      #     ▶ 运行测试 a ...        ← a.c
+      #     run test_a
+      #     ✔ a
+      #     ▶ 运行测试 a ...        ← a.cpp，跑的却是**同一个** target
+      #     run test_a
+      #     ✔ a
+      #     ▶ 运行测试 b ...
+      #     run test_b
+      #     ✔ b
+      #     ✅ 3 个测试全部通过
+      #
+      # 而生成的 `xmake.lua` 里 `target("test_a")` 出现了**两次** —— 也就是
+      # `a.cpp` **一次都没被编译**，却被告知「3 个测试全部通过」。
+      #
+      # 修法：命名规则收敛到 `test_sources()` 一处（`gen_xmake_lua` 与 `test()`
+      # 共用）；同名不同扩展时带上扩展名区分（`test_a_c` / `test_a_cpp`）。
+      - name: 同名测试文件不许撞成同一个 target（lyco test 的「全部通过」必须是真的）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin"
+
+          # 假 xmake：把收到的参数原样打印、退出 0。断言因此不依赖 runner 上装没装
+          # xmake，而且「跑了哪个 target」变成**可观察的输出**。
+          cat > "$W/bin/xmake" <<'XMAKE'
+          #!/bin/sh
+          printf '%s\n' "$*"
+          exit 0
+          XMAKE
+          chmod +x "$W/bin/xmake"
+
+          mkdir -p "$W/p1/tests"
+          printf '[package]\nname = "p1"\nversion = "0.1.0"\n' > "$W/p1/Lyco.toml"
+          # 三个文件，其中 a.c / a.cpp **同名不同扩展** —— 就是撞名的现场。
+          printf 'int main(void){return 0;}\n' > "$W/p1/tests/a.c"
+          printf 'int main(){return 0;}\n'      > "$W/p1/tests/a.cpp"
+          printf 'int main(void){return 0;}\n' > "$W/p1/tests/b.c"
+
+          out=$(cd "$W/p1" && env PATH="$W/bin" "$LYCO" test 2>&1) || {
+            echo "❌ lyco test 失败了"; printf '%s\n' "$out"; exit 1; }
+
+          # ① 生成的 xmake.lua 里，test_* target 名必须**互不相同**。
+          #    旧行为：`target("test_a")` 出现两次。
+          tgs=$(grep -oE '^target\("test_[^"]*"\)' "$W/p1/xmake.lua" \
+            | sed -E 's/^target\("(.*)"\)$/\1/' | sort || true)
+          n_all=$(printf '%s\n' "$tgs" | grep -c . || true)
+          n_uniq=$(printf '%s\n' "$tgs" | sort -u | grep -c . || true)
+          [ "$n_all" -eq 3 ] \
+            || { echo "❌ xmake.lua 里的 test target 不是 3 个（实际 ${n_all}）"; printf '%s\n' "$tgs"; exit 1; }
+          [ "$n_all" -eq "$n_uniq" ] \
+            || { echo "❌ 有同名 test target（${n_all} 个里只有 ${n_uniq} 个不同）"; printf '%s\n' "$tgs"; exit 1; }
+
+          # ② 三个源文件必须**各自**被 add_files 进去 —— 只数 target 个数不够，
+          #    「3 个 target 但有一个文件没进任何 target」同样会漏。
+          for f in a.c a.cpp b.c; do
+            grep -q "add_files(\"tests/${f}\")" "$W/p1/xmake.lua" \
+              || { echo "❌ ${f} 没有被加进任何 test target"; cat "$W/p1/xmake.lua"; exit 1; }
+          done
+
+          # ③ `lyco test` 必须真的跑了 3 个**不同**的 target。
+          runs=$(printf '%s' "$out" | grep -E '^run test_' | awk '{print $2}' | sort -u | grep -c . || true)
+          [ "$runs" -eq 3 ] \
+            || { echo "❌ 只跑了 ${runs} 个不同的 target（应为 3）"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '✅ 3 个测试全部通过' \
+            || { echo "❌ 没有报「3 个测试全部通过」"; printf '%s\n' "$out"; exit 1; }
+
+          # ④ 判据自检：**不撞名**时 target 名必须还是 `test_<stem>` ——
+          #    证明消歧没有把所有名字都改掉（否则 ①②③ 只是「名字变了」，
+          #    而不是「撞名被解决了」）。
+          mkdir -p "$W/p2/tests"
+          printf '[package]\nname = "p2"\nversion = "0.1.0"\n' > "$W/p2/Lyco.toml"
+          printf 'int main(void){return 0;}\n' > "$W/p2/tests/b.c"
+          (cd "$W/p2" && env PATH="$W/bin" "$LYCO" test) > "$W/o2" 2>&1 || {
+            echo "❌ 只有一个测试文件时 lyco test 失败了"; cat "$W/o2"; exit 1; }
+          grep -q '^target("test_b")' "$W/p2/xmake.lua" \
+            || { echo "❌ 不撞名时 target 名不是 test_b"; cat "$W/p2/xmake.lua"; exit 1; }
+          # ⚠️ 这里**不能**写成 `printf '%s' "$W/o2" | grep` —— `"$W/o2"` 是**路径**，
+          # 不是内容（上面用的是 `> "$W/o2"` 重定向）。那样写 grep 永远匹配不上，
+          # 这一步就永远变红。正断言要直接 grep 文件。
+          grep -q '✅ 1 个测试全部通过' "$W/o2" \
+            || { echo "❌ 只有一个测试文件时没说「1 个测试全部通过」"; cat "$W/o2"; exit 1; }
+
+          # ⑤ 目录名恰好像源文件（`tests/d.cpp/`）**不算**测试文件 ——
+          #    `read_dir` 会把它列出来，`extension()` 同样是 `cpp`。
+          mkdir -p "$W/p3/tests/d.cpp"
+          printf '[package]\nname = "p3"\nversion = "0.1.0"\n' > "$W/p3/Lyco.toml"
+          printf 'int main(void){return 0;}\n' > "$W/p3/tests/e.c"
+          (cd "$W/p3" && env PATH="$W/bin" "$LYCO" test) > "$W/o3" 2>&1 || {
+            echo "❌ 有同名目录时 lyco test 失败了"; cat "$W/o3"; exit 1; }
+          if grep -q 'd\.cpp' "$W/p3/xmake.lua"; then
+            echo "❌ 目录 tests/d.cpp/ 被当成测试文件了"; cat "$W/p3/xmake.lua"; exit 1
+          fi
+          grep -q '✅ 1 个测试全部通过' "$W/o3" \
+            || { echo "❌ 目录被算成测试了（应只有 1 个）"; cat "$W/o3"; exit 1; }
+
+          echo "✅ lyco test：同名不同扩展各跑各的 target（3 个文件 3 个 target），不撞名时名字不变，目录不算测试"
+
+      # `lyco doc` 打印的 `✅ 文档输出: docs/api/html/index.html` 是**写死**的，
+      # 而它上一句就是「📄 已生成默认 Doxyfile (可自行修改)」—— **明确邀请用户改**。
+      # 用户把 `OUTPUT_DIRECTORY` 改成 `build/doc` 之后，这句话仍然指着
+      # `docs/api/html/index.html`：一个**死地址**（§27 那个「服务没起来照样给地址」
+      # 的同类）。
+      #
+      # 实测（修复前）：Doxyfile 里写 `OUTPUT_DIRECTORY = build/doc` 时，输出是
+      #
+      #     ✅ 文档输出: docs/api/html/index.html
+      #
+      # 而那个目录根本不存在（连 `build/` 都没有）。
+      #
+      # 修法：路径从 Doxyfile 里读（`doxygen_html_index()`），并且**确认它真的存在**；
+      # 不在预期位置就如实说「没找到」，不许猜。
+      - name: lyco doc 的输出路径必须是真的（不许打印死地址）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin"
+
+          # 假 doxygen：`--version` 与「按 Doxyfile 生成」都退出 0，但**什么都不造**。
+          # 首页由 fixture 自己摆好 —— 这样「打印的路径对不对」是**我们摆好的事实**，
+          # 而不是我们替被测程序猜的。（本 job 只跑 ubuntu / macos，所以能用脚本。）
+          cat > "$W/bin/doxygen" <<'DOXY'
+          #!/bin/sh
+          case "$1" in
+            --version) echo "1.9.8" ;;
+          esac
+          exit 0
+          DOXY
+          chmod +x "$W/bin/doxygen"
+
+          mkproj() {  # $1 = 目录名, $2 = Doxyfile 内容（空串 = 不建 Doxyfile）
+            mkdir -p "$W/$1/src"
+            printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$1" > "$W/$1/Lyco.toml"
+            printf 'int main(void){return 0;}\n' > "$W/$1/src/main.c"
+            [ -n "$2" ] && printf '%s' "$2" > "$W/$1/Doxyfile"
+            return 0
+          }
+
+          # ── d1：用户把输出目录改成了 build/doc ──────────────────────
+          mkproj d1 'PROJECT_NAME = "d1"
+          INPUT = src
+          GENERATE_HTML = YES
+          OUTPUT_DIRECTORY = build/doc
+          '
+          # ⓪ 判据自检：这个 fixture 里 `docs/api/html/index.html` **不存在**，
+          #    否则「不许打印 docs/api/…」这条断言证明不了什么。
+          [ ! -e "$W/d1/docs/api/html/index.html" ] \
+            || { echo "❌ 自检失败：fixture 里意外存在 docs/api/html/index.html"; exit 1; }
+
+          out=$(cd "$W/d1" && env PATH="$W/bin" "$LYCO" doc 2>&1) || {
+            echo "❌ lyco doc 失败了"; printf '%s\n' "$out"; exit 1; }
+
+          # ① 不许再打印那个死地址。
+          if printf '%s' "$out" | grep -q 'docs/api/html/index.html'; then
+            echo "❌ Doxyfile 里写的是 build/doc，却仍然打印 docs/api/html/index.html"
+            printf '%s\n' "$out"; exit 1
+          fi
+          # ② 必须打印**从 Doxyfile 读出来的**真实路径。
+          printf '%s' "$out" | grep -q 'build/doc/html/index.html' \
+            || { echo "❌ 没打印真实的输出路径 build/doc/html/index.html"; printf '%s\n' "$out"; exit 1; }
+          # ③ 判据自检：首页不在时不许说「文档输出: …」（要如实说没找到）。
+          printf '%s' "$out" | grep -q 'doxygen 已成功' \
+            || { echo "❌ doxygen 成功但首页不在时没有如实说"; printf '%s\n' "$out"; exit 1; }
+          if printf '%s' "$out" | grep -q '文档输出:'; then
+            echo "❌ 首页不存在却仍然打印「文档输出: …」"; printf '%s\n' "$out"; exit 1
+          fi
+
+          # ── d2：默认 Doxyfile（我们自己生成的那份，OUTPUT_DIRECTORY = docs/api），
+          #         且首页**真的在** → 必须照常打印 ✅ 文档输出。
+          #         这条是「修『别打印死地址』不等于把正常情况也说成没找到」的自检。
+          mkproj d2 ''
+          mkdir -p "$W/d2/docs/api/html"
+          : > "$W/d2/docs/api/html/index.html"
+          out=$(cd "$W/d2" && env PATH="$W/bin" "$LYCO" doc 2>&1) || {
+            echo "❌ 生成默认 Doxyfile 时 lyco doc 失败了"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '已生成默认 Doxyfile' \
+            || { echo "❌ 没生成默认 Doxyfile"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '✅ 文档输出: docs/api/html/index.html' \
+            || { echo "❌ 首页存在时没有打印「✅ 文档输出: docs/api/html/index.html」"; printf '%s\n' "$out"; exit 1; }
+
+          # ── d3：Doxyfile 里**没有** OUTPUT_DIRECTORY → 退回默认 docs/api。
+          mkproj d3 'PROJECT_NAME = "d3"
+          INPUT = src
+          GENERATE_HTML = YES
+          '
+          mkdir -p "$W/d3/docs/api/html"
+          : > "$W/d3/docs/api/html/index.html"
+          out=$(cd "$W/d3" && env PATH="$W/bin" "$LYCO" doc 2>&1) || {
+            echo "❌ 没有 OUTPUT_DIRECTORY 时 lyco doc 失败了"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '✅ 文档输出: docs/api/html/index.html' \
+            || { echo "❌ 没有 OUTPUT_DIRECTORY 时没退回默认 docs/api"; printf '%s\n' "$out"; exit 1; }
+
+          echo "✅ lyco doc：输出路径从 Doxyfile 里读（改了就跟着变），首页不存在时如实说没找到，缺 OUTPUT_DIRECTORY 时退回 docs/api"

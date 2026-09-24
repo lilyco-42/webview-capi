@@ -891,19 +891,49 @@ fn cmd_new(name: &str, url: &str, lang: &str) {
 }
 
 // 解析 build/run 通用旗标: -r/--release, --target <plat>
-fn parse_build_flags(cmd_args: &[String]) -> (bool, Option<String>) {
+//
+// **未知旗标 / `--target` 缺值 / 多余的位置参数都要报错** —— 原来这里是 `_ => {}`，
+// 把不认识的参数静默吃掉。后果很具体：
+//
+//     $ lyco build --relase          # --release 拼错了
+//     f -y -m debug ...              # 静默按 debug 建
+//     ✅ 完成                          # 用户以为拿到的是 release
+//
+// 同一个项目里 `lyco add` 早就是严格的（`未知参数: --bogus` → 退出 1），
+// 这里跟上同一套标准 —— 参数写错必须当场说，不能「按默认值做完再报成功」。
+fn parse_build_flags(cmd_args: &[String]) -> Result<(bool, Option<String>), String> {
     let mut release = false;
     let mut target = None;
     let mut i = 0;
     while i < cmd_args.len() {
         match cmd_args[i].as_str() {
             "-r" | "--release" => release = true,
-            "--target" => { i += 1; target = cmd_args.get(i).cloned(); }
-            _ => {}
+            "--target" => {
+                i += 1;
+                match cmd_args.get(i) {
+                    Some(v) => target = Some(v.clone()),
+                    // `get(i)` 返回 None 时原来是 `target = None` —— 等于把
+                    // 「--target 后面忘了写平台名」悄悄降级成「没指定平台」。
+                    None => {
+                        return Err(
+                            "「--target」后面要跟一个平台名 (windows/mingw/linux/macos/android/ios/wasm)"
+                                .into(),
+                        )
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                return Err(format!(
+                    "未知参数: {other}  (支持 -r / --release / --target <plat>)"
+                ));
+            }
+            other => {
+                return Err(format!("多余的参数: {other}  (lyco build / run 不接受位置参数)"));
+            }
         }
         i += 1;
     }
-    (release, target)
+    Ok((release, target))
 }
 
 /// 跑一个子进程，把「启动不了」和「退出码非 0」都变成**失败**。
@@ -926,7 +956,13 @@ fn run_step(what: &str, mut cmd: Command) -> Result<(), String> {
 }
 
 fn cmd_build(cmd_args: &[String]) {
-    let (release, target) = parse_build_flags(cmd_args);
+    let (release, target) = match parse_build_flags(cmd_args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
+    };
     if Path::new(manifest::MANIFEST).exists() {
         match manifest::build(release, target.as_deref()) {
             Ok(()) => println!("✅ 完成"),
@@ -994,8 +1030,17 @@ fn cmd_build(cmd_args: &[String]) {
 }
 
 fn cmd_run(cmd_args: &[String]) {
+    // 旗标在最前面就解析：写错的参数要当场说，别等到「构建完再报成功」。
+    // 放在这里（而不是只放在有 `Lyco.toml` 的分支里）是为了让 CMake / 没工程
+    // 的路径也一样 —— 参数错误与「这个目录能不能跑」是两件事，前者更该先说。
+    let (release, target) = match parse_build_flags(cmd_args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
+    };
     if Path::new(manifest::MANIFEST).exists() {
-        let (release, target) = parse_build_flags(cmd_args);
         if let Err(e) = manifest::run(release, target.as_deref()) {
             eprintln!("❌ {e}"); std::process::exit(1);
         }
@@ -1007,6 +1052,8 @@ fn cmd_run(cmd_args: &[String]) {
     // 这里原来写的是 `cmd_build(&[])` —— **把 `cmd_args` 整个丢掉**，于是
     // `lyco run -r --target android` 建的还是 debug、还是宿主平台。
     if Path::new("xmake.lua").exists() {
+        // 这里再解析一遍旗标（`parse_build_flags` 是纯函数、无副作用）——
+        // 参数校验已经在上面做过，所以这一遍一定成功。
         cmd_build(cmd_args);
         println!("▶ 运行...");
         let mut c = Command::new("xmake");

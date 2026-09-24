@@ -783,3 +783,71 @@ jobs:
             || { echo "❌ 没报告「无法执行 xmake」（真实错误被丢掉/换成了猜测）"; cat "$W/o8"; exit 1; }
 
           echo "✅ -r / --target 在 xmake 与 CMake 两条路径上都真的生效（或明确拒绝）"
+
+      - name: 参数写错必须当场说（不许「按默认值做完再报成功」）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin" "$W/xp" "$W/toml"
+
+          # 假 xmake（回显参数 + 退出 0）：用来观察「有没有真的按默认值去建」
+          cat > "$W/bin/xmake" <<'XMAKE'
+          #!/bin/sh
+          printf '%s\n' "$*"
+          exit 0
+          XMAKE
+          chmod +x "$W/bin/xmake"
+          printf 'target("x")\n' > "$W/xp/xmake.lua"
+          printf '[package]\nname = "x"\nversion = "0.1.0"\n' > "$W/toml/Lyco.toml"
+
+          # ① 拼错的旗标必须失败。旧行为：解析器里 `_ => {}` 把它静默吃掉 →
+          #    按 debug 建完 → 「✅ 完成」。用户以为拿到的是 release，实际是 debug。
+          if (cd "$W/xp" && env PATH="$W/bin" "$LYCO" build --relase) > "$W/b1" 2>&1; then
+            echo "❌ --relase（拼错 --release）居然成功了（静默按 debug 建完还报成功）"; cat "$W/b1"; exit 1
+          fi
+          grep -q '未知参数' "$W/b1" || { echo "❌ 没说清是未知参数"; cat "$W/b1"; exit 1; }
+          if grep -q '✅ 完成' "$W/b1"; then
+            echo "❌ 参数写错却打印了「✅ 完成」"; cat "$W/b1"; exit 1
+          fi
+
+          # ② 有 Lyco.toml 时也一样 —— 两条路径不许有差别
+          if (cd "$W/toml" && env PATH="$W/bin" "$LYCO" build --relase) > "$W/b2" 2>&1; then
+            echo "❌ 有 Lyco.toml 时 --relase 居然成功了"; cat "$W/b2"; exit 1
+          fi
+          grep -q '未知参数' "$W/b2" || { echo "❌ 没说清是未知参数"; cat "$W/b2"; exit 1; }
+
+          # ③ `--target` 缺值必须失败。旧行为：`get(i)` 返回 None → `target = None`
+          #    —— 把「忘了写平台名」悄悄降级成「没指定平台」，然后建宿主平台还报成功。
+          if (cd "$W/xp" && env PATH="$W/bin" "$LYCO" build --target) > "$W/b3" 2>&1; then
+            echo "❌ --target 缺值居然成功了"; cat "$W/b3"; exit 1
+          fi
+          grep -q '后面要跟一个平台名' "$W/b3" || { echo "❌ 没说清 --target 缺值"; cat "$W/b3"; exit 1; }
+
+          # ④ 多余的位置参数必须失败 —— `lyco add` 早就是严格的（`多余的参数: ...`），
+          #    `lyco build` 没有理由更宽松。
+          if (cd "$W/xp" && env PATH="$W/bin" "$LYCO" build foo) > "$W/b4" 2>&1; then
+            echo "❌ 多余的位置参数居然成功了"; cat "$W/b4"; exit 1
+          fi
+          grep -q '多余的参数' "$W/b4" || { echo "❌ 没说清有多余参数"; cat "$W/b4"; exit 1; }
+
+          # ⑤ `run` 走同一个解析器，不许有例外
+          if (cd "$W/xp" && env PATH="$W/bin" "$LYCO" run --relase) > "$W/b5" 2>&1; then
+            echo "❌ lyco run --relase 居然成功了"; cat "$W/b5"; exit 1
+          fi
+          grep -q '未知参数' "$W/b5" || { echo "❌ run 没说清是未知参数"; cat "$W/b5"; exit 1; }
+
+          # ⑥ 判据自检：**正确的**旗标必须照常生效、且不许被当成错误参数。
+          #    没有这一步，①-⑤ 可能只是「凡是带参数就报错」的空检查。
+          out=$(cd "$W/xp" && env PATH="$W/bin" "$LYCO" build -r --target android 2>&1) || true
+          printf '%s' "$out" | grep -q '\-m release' \
+            || { echo "❌ 自检失败：-r 没传下去"; printf '%s\n' "$out"; exit 1; }
+          printf '%s' "$out" | grep -q '\-p android' \
+            || { echo "❌ 自检失败：--target 没传下去"; printf '%s\n' "$out"; exit 1; }
+          if printf '%s' "$out" | grep -q '未知参数\|多余的参数'; then
+            echo "❌ 自检失败：正确的旗标被当成了错误参数"; printf '%s\n' "$out"; exit 1
+          fi
+
+          echo "✅ 参数写错当场说（xmake / Lyco.toml / run 三条路径一致），正确旗标照常生效"

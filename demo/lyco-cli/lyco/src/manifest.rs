@@ -568,7 +568,18 @@ pub fn test() -> Result<(), String> {
     // 而那个 `m` 从头到尾没被用过。）
     build(false, None)?; // gen_xmake_lua 会为 tests/ 生成 test_* target
 
-    let rd = fs::read_dir("tests").map_err(|_| "没有 tests/ 目录 (放 tests/xxx.c 后重试)".to_string())?;
+    // 原来这里是 `fs::read_dir("tests").map_err(|_| "没有 tests/ 目录 …")` ——
+    // 把真实的 `io::Error` 丢掉、换成一个**猜出来的结论**。`tests` 存在但没有读
+    // 权限、或者 `tests` 是个**文件**（`read_dir` 会报 ENOTDIR），都会被说成
+    // 「没有 tests/ 目录」，而那句提示让用户去「放 tests/xxx.c 后重试」——
+    // 他会照做，然后发现目录明明在。现在只有 `NotFound` 才说「没有」。
+    let rd = match fs::read_dir("tests") {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err("没有 tests/ 目录 (放 tests/xxx.c 后重试)".into());
+        }
+        Err(e) => return Err(format!("无法读取 tests/ 目录: {e}")),
+    };
     let mut ran = 0;
     let mut failed = 0;
     for e in rd.filter_map(|e| e.ok()) {

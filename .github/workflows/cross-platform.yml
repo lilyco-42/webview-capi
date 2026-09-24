@@ -944,3 +944,116 @@ jobs:
           grep -q '多余的参数' "$W/o7" || { echo "❌ 没报多余的参数"; cat "$W/o7"; exit 1; }
 
           echo "✅ lyco install 真的能装：Unix 无扩展名产物找得到、[名字] 生效、错误不泄漏占位符、写错的参数当场报"
+
+      # 上一步管 `build` / `run` / `install`，这一步管**其余 18 个命令**。
+      #
+      # 原来只有 `new` / `add` / `install` / `uninstall` 会看参数，剩下 15 个命令
+      # **完全不读 `cmd_args`** —— 帮助表里它们的参数列都是空的，却对多出来的参数
+      # 一声不吭。实测（修复前的二进制，HOME 已隔离）：
+      #
+      #   lyco reset --bogus   → rc=0，**真的重置了 ~/.lyco/**，还打印「✅ 已重置」
+      #   lyco clean --bogus   → rc=0
+      #   lyco list --bogus / info --bogus / bench --bogus / publish --bogus → rc=0
+      #
+      # 用户敲错一个字符，拿到的是「看起来成功、其实按默认行为执行」的结果。
+      - name: 每个命令都不许静默吞掉参数（lyco reset --bogus 不许真的重置）
+        shell: bash
+        run: |
+          set -euo pipefail
+          LYCO="$PWD/demo/lyco-cli/lyco/target/release/lyco"
+          W="$(mktemp -d)"
+          export HOME="$W/home"
+          mkdir -p "$HOME" "$W/bin" "$W/proj"
+
+          # 假 xmake：退出 0。断言因此不依赖 runner 上装没装 xmake。
+          printf '#!/bin/sh\nexit 0\n' > "$W/bin/xmake"
+          chmod +x "$W/bin/xmake"
+
+          (cd "$W/proj" && env PATH="$W/bin" "$LYCO" new demo c) > "$W/new" 2>&1
+          grep -q '已创建' "$W/new" || { echo "❌ 连 fixture 都建不起来"; cat "$W/new"; exit 1; }
+
+          # 注意 `web` 是常驻命令 —— 一律带超时；超时不算错（第 16 步同理）。
+          run() { (cd "$W/proj" && timeout 10 env PATH="$W/bin" PORT=19923 "$LYCO" $1 2>&1 </dev/null) || true; }
+
+          # ① 帮助里参数列为空的 11 个命令：带任何参数都必须当场报错。
+          #    判据与 build / run / install 一致：`-` 开头 = 未知参数，其余 = 多余的参数。
+          zero="check test doc clean web reset info list bench publish update"
+          for c in $zero; do
+            out=$(run "${c} --bogus")
+            printf '%s' "$out" | grep -q '未知参数' \
+              || { echo "❌ lyco ${c} --bogus 没有报未知参数"; printf '%s\n' "$out"; exit 1; }
+            out=$(run "${c} extra")
+            printf '%s' "$out" | grep -q '多余的参数' \
+              || { echo "❌ lyco ${c} extra 没有报多余的参数"; printf '%s\n' "$out"; exit 1; }
+          done
+
+          # ② 判据自检：**不带参数**时不许出现这两句。没有这一步，① 可能只是
+          #    「凡是调用就报错」的空检查 —— 那比没有检查还危险。
+          for c in $zero; do
+            out=$(run "${c}")
+            if printf '%s' "$out" | grep -q '未知参数\|多余的参数'; then
+              echo "❌ 自检失败：lyco ${c}（不带参数）也报了参数错误，① 的判据无效"
+              printf '%s\n' "$out"; exit 1
+            fi
+          done
+
+          # ③ 真正的危害：`reset --bogus` 曾经**真的执行了重置**并报「✅ 已重置」。
+          #    所以这里不只判退出码，还要判「不许出现执行过的痕迹」。
+          out=$(run "reset --bogus")
+          if printf '%s' "$out" | grep -q '已重置'; then
+            echo "❌ lyco reset --bogus 居然真的执行了重置"; printf '%s\n' "$out"; exit 1
+          fi
+          printf '%s' "$out" | grep -q '未知参数' \
+            || { echo "❌ lyco reset --bogus 没报未知参数"; printf '%s\n' "$out"; exit 1; }
+
+          out=$(run "clean --bogus")
+          printf '%s' "$out" | grep -q '未知参数' \
+            || { echo "❌ lyco clean --bogus 没报未知参数"; printf '%s\n' "$out"; exit 1; }
+
+          # ④ 有上限的命令：多出来的位置参数不许被咽下去。
+          while IFS='|' read -r cmd want; do
+            [ -n "$cmd" ] || continue
+            out=$(run "$cmd")
+            printf '%s' "$out" | grep -q "$want" \
+              || { echo "❌ lyco ${cmd} 没有报「${want}」"; printf '%s\n' "$out"; exit 1; }
+          done <<'CASES'
+          new demo9 c url extra|多余的参数
+          init a b|多余的参数
+          search a b|多余的参数
+          remove a b|多余的参数
+          restore a b|多余的参数
+          CASES
+
+          # ⑤ 判据自检：**正好在上限**的调用必须照常工作（防止 max 写成 len-1，
+          #    把正常用法也一起毙掉）。
+          # 名字刻意避开 ④ 用过的 demo9：旧行为下 ④ 会真的把 demo9 建出来，
+          # 那样 ⑤ 就变成「目录已存在」—— 那是脚本自己的顺序假阳性，不是真问题。
+          out=$(run "new demo9b c")
+          printf '%s' "$out" | grep -q '已创建' \
+            || { echo "❌ 自检失败：lyco new demo9b c（正好 2 个参数）不该失败"; printf '%s\n' "$out"; exit 1; }
+          out=$(run "restore")
+          printf '%s' "$out" | grep -qE '可用备份|没有备份' \
+            || { echo "❌ 自检失败：lyco restore（0 个参数）不该失败"; printf '%s\n' "$out"; exit 1; }
+
+          # ⑥ `tests` 是个**文件**时，`read_dir` 报的是 ENOTDIR —— 不许说成
+          #    「没有 tests/ 目录」（那是把真实错误换成一个猜出来的结论，
+          #    而那句提示会让用户去「放 tests/xxx.c 后重试」，他会发现目录明明在）。
+          mkdir -p "$W/tf"
+          printf '[package]\nname = "tf"\nversion = "0.1.0"\n' > "$W/tf/Lyco.toml"
+          : > "$W/tf/tests"
+          out=$(cd "$W/tf" && timeout 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          printf '%s' "$out" | grep -q '无法读取 tests/ 目录' \
+            || { echo "❌ tests 是文件时没说清是「读不了」"; printf '%s\n' "$out"; exit 1; }
+          if printf '%s' "$out" | grep -q '没有 tests/ 目录'; then
+            echo "❌ 把「读不了」说成了「没有」"; printf '%s\n' "$out"; exit 1
+          fi
+
+          # ⑦ 判据自检：**真的**没有 `tests/` 时，原来那句友好提示必须保留
+          #    （修「别猜」不等于把有用的提示一起删掉）。
+          mkdir -p "$W/tn"
+          printf '[package]\nname = "tn"\nversion = "0.1.0"\n' > "$W/tn/Lyco.toml"
+          out=$(cd "$W/tn" && timeout 10 env PATH="$W/bin" "$LYCO" test 2>&1 </dev/null) || true
+          printf '%s' "$out" | grep -q '没有 tests/ 目录' \
+            || { echo "❌ 真的没有 tests/ 时反而没说「没有 tests/ 目录」"; printf '%s\n' "$out"; exit 1; }
+
+          echo "✅ 18 个命令的参数校验统一：写错的旗标 / 多余的位置参数都当场说，正常的调用照常工作"

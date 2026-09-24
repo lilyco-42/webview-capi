@@ -379,7 +379,11 @@ fn platform_args(target_plat: Option<&str>) -> Result<Vec<String>, String> {
     Ok(v)
 }
 
-fn xmake_config(release: bool, target_plat: Option<&str>) -> Result<(), String> {
+/// `pub`：`main.rs` 里「没有 `Lyco.toml`、只有手写 `xmake.lua`」的回退分支也要用它
+/// —— 那条路径原来是自己拼一条光杆 `Command::new("xmake")`，把 `-r` / `--target`
+/// 整个丢掉了（`lyco build -r` 建的是 debug、`--target android` 建的是宿主平台，
+/// 而两者都打印「✅ 完成」）。平台名映射（`plat`）只能有这一份，别再抄一遍。
+pub fn xmake_config(release: bool, target_plat: Option<&str>) -> Result<(), String> {
     let mut conf = Command::new("xmake");
     conf.args(["f", "-y", "-m", if release { "release" } else { "debug" }]);
     for a in platform_args(target_plat)? {

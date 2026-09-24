@@ -940,23 +940,46 @@ fn cmd_build(cmd_args: &[String]) {
     // 这一段原来把子进程退出码整个吞掉（`let _ = …status()`），再无条件打印
     // 「✅ 完成」：编译失败报成功，**连一个工程文件都没有、压根没干活**也报成功
     // —— 而且这两种情况的输出一模一样，用户根本分不出自己属于哪种。
+    //
+    // 还有一处「同一件事两条路径、一条诚实一条撒谎」：`-r` / `--target` 被
+    // `parse_build_flags` 解析出来之后**从没被用过**。于是 `lyco build -r`
+    // 建的是 debug、`lyco build --target android` 建的是宿主平台，而两者都打印
+    // 「✅ 完成」；更糟的是非法平台（`--target bogus`）本该报「未知平台」，
+    // 也一样报成功 —— 而**有 `Lyco.toml` 时**它是会报错的。
+    // 现在两条路径共用 `manifest` 里那一份配置逻辑，别再各拼一份。
     let r: Result<(), String> = if Path::new("xmake.lua").exists() {
         println!("🔨 构建 (xmake)...");
-        run_step("xmake", Command::new("xmake"))
+        manifest::xmake_config(release, target.as_deref()).and_then(|()| {
+            let mut c = Command::new("xmake");
+            c.arg("-y");
+            run_step("xmake", c)
+        })
     } else if Path::new("CMakeLists.txt").exists() {
         println!("🔨 构建 (cmake)...");
-        let mut r = fs::create_dir_all("build").map_err(|e| format!("创建 build/ 失败: {e}"));
-        if r.is_ok() {
-            let mut c = Command::new("cmake");
-            c.args([".."]).current_dir("build");
-            r = run_step("cmake 配置", c);
+        // cmake 侧：`-r` 映射成 `-DCMAKE_BUILD_TYPE`；`--target` 需要工具链文件，
+        // lyco 不提供 —— 所以**明确拒绝**，而不是默默按宿主平台构建再报成功。
+        if let Some(t) = target.as_deref() {
+            Err(format!(
+                "--target {t} 只支持 xmake 工程 (Lyco.toml / xmake.lua); \
+                 这个目录是 CMake 工程, 请自己给 cmake 指定工具链文件"
+            ))
+        } else {
+            let bt = if release { "Release" } else { "Debug" };
+            let mut r = fs::create_dir_all("build").map_err(|e| format!("创建 build/ 失败: {e}"));
+            if r.is_ok() {
+                let mut c = Command::new("cmake");
+                c.arg("..")
+                    .arg(format!("-DCMAKE_BUILD_TYPE={bt}"))
+                    .current_dir("build");
+                r = run_step("cmake 配置", c);
+            }
+            if r.is_ok() {
+                let mut c = Command::new("cmake");
+                c.args(["--build", "."]).current_dir("build");
+                r = run_step("cmake 构建", c);
+            }
+            r
         }
-        if r.is_ok() {
-            let mut c = Command::new("cmake");
-            c.args(["--build", "."]).current_dir("build");
-            r = run_step("cmake 构建", c);
-        }
-        r
     } else {
         Err("当前目录没有可构建的工程: Lyco.toml / xmake.lua / CMakeLists.txt 都不存在".to_string())
     };
@@ -980,13 +1003,27 @@ fn cmd_run(cmd_args: &[String]) {
     }
     // 非 `Lyco.toml` 工程：先构建。构建不成功会在 `cmd_build` 里 `exit(1)`，
     // 走不到「▶ 运行...」—— 原来那句 `let _ = xmake run` 是**构建失败也照跑**。
-    cmd_build(&[]);
-    println!("▶ 运行...");
-    let mut c = Command::new("xmake");
-    c.arg("run");
-    if let Err(e) = run_step("xmake run", c) {
-        eprintln!("❌ {e}");
+    //
+    // 这里原来写的是 `cmd_build(&[])` —— **把 `cmd_args` 整个丢掉**，于是
+    // `lyco run -r --target android` 建的还是 debug、还是宿主平台。
+    if Path::new("xmake.lua").exists() {
+        cmd_build(cmd_args);
+        println!("▶ 运行...");
+        let mut c = Command::new("xmake");
+        c.arg("run");
+        if let Err(e) = run_step("xmake run", c) {
+            eprintln!("❌ {e}");
+            std::process::exit(1);
+        }
+    } else if Path::new("CMakeLists.txt").exists() {
+        // 原来是直接 `xmake run` —— 这个目录根本没有 xmake.lua，真 xmake 只会报
+        // 「xmake.lua not found」，用户看不出「lyco run 本来就不支持 CMake 工程」。
+        eprintln!("❌ lyco run 只支持 xmake 工程 (Lyco.toml / xmake.lua)");
+        eprintln!("   这个目录是 CMake 工程 —— 先 `lyco build`, 再直接跑 build/ 下的产物");
         std::process::exit(1);
+    } else {
+        // 没有工程文件：交给 cmd_build 统一报「没有可构建的工程」并退出 1
+        cmd_build(cmd_args);
     }
 }
 

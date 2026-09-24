@@ -590,30 +590,59 @@ pub fn test() -> Result<(), String> {
 }
 
 // ── install / uninstall: 构建并安装到 ~/.lyco/bin ───────────
+
+/// 可执行文件后缀：Windows 是 `.exe`，其他平台是空串。
+///
+/// 这三处（`find_built_exe` 的匹配、`install` 的目标名、`uninstall` 的查找名）
+/// 原来都把 `.exe` 写死。而 xmake 在 Linux/macOS 上产出的是
+/// `build/<plat>/<arch>/<mode>/<名字>` —— **没有扩展名**。于是：
+///   * `lyco install` 在 ubuntu/macOS 上**必然**报「构建产物未找到」，
+///     而且那句错误信息还叫用户去找一个永远不存在的 `.exe`；
+///   * 即使找到了，也会被装成 `<名字>.exe`，在 Unix 上是个看着就不对的文件名。
+/// 用 `std::env::consts::EXE_SUFFIX` 让平台自己决定，别再猜。
+const EXE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
+
 fn find_built_exe(dir: &Path, name: &str) -> Option<PathBuf> {
     let rd = fs::read_dir(dir).ok()?;
+    let want = format!("{name}{EXE_SUFFIX}");
     for e in rd.filter_map(|e| e.ok()) {
         let p = e.path();
         if p.is_dir() {
             if let Some(f) = find_built_exe(&p, name) { return Some(f); }
-        } else if p.file_name().map(|n| n.to_string_lossy() == format!("{name}.exe")).unwrap_or(false) {
+        } else if p.file_name().map(|n| n.to_string_lossy() == want).unwrap_or(false) {
             return Some(p);
         }
     }
     None
 }
 
-pub fn install() -> Result<(), String> {
+/// 构建 (release) 并安装到 `~/.lyco/bin`。
+///
+/// `name` 就是帮助里写的 `lyco install [名字]`。它**一直**在帮助里写着，但
+/// 代码从来没读过 —— 原来签名是 `install()`，连形参都没有，于是
+/// `lyco install myapp` 会静默地按 `Lyco.toml` 的项目名装成另一个命令。
+/// 现在它真的生效，并且与 `uninstall [名字]` 对称：`uninstall myapp` 找的
+/// 就是这里装出来的那个文件。
+pub fn install(name: Option<&str>) -> Result<(), String> {
     build(true, None)?;
     let m = Manifest::load()?;
-    let name = m.project_name();
-    let exe = find_built_exe(Path::new("build"), &name)
-        .ok_or("构建产物未找到 (build/**/<name>.exe)")?;
+    let proj = m.project_name();
+    // 报错里必须写出**真的去找了什么**。原来那句是字面量
+    // `"构建产物未找到 (build/**/<name>.exe)"` —— `<name>` 会原样打给用户
+    // （占位符泄漏），而且后缀在 Linux/macOS 上本来就是错的。
+    let exe = find_built_exe(Path::new("build"), &proj)
+        .ok_or_else(|| format!("构建产物未找到 (build/**/{proj}{EXE_SUFFIX})"))?;
     let dest_dir = super::data_dir().join("bin");
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
-    let dest = dest_dir.join(format!("{name}.exe"));
+    let installed = name.unwrap_or(&proj);
+    let dest = dest_dir.join(format!("{installed}{EXE_SUFFIX}"));
     fs::copy(&exe, &dest).map_err(|e| e.to_string())?;
     println!("✅ 已安装 {}", dest.display());
+    if installed != proj {
+        // 改名安装时把两件事都说清：装成了什么、怎么卸掉。
+        // 不说的话，`lyco uninstall`（不带名字）会去找项目名，然后报「未安装」。
+        println!("   (项目 {proj} → 命令 {installed}; 卸载: lyco uninstall {installed})");
+    }
     println!("   提示: 把 {} 加入 PATH 后可全局调用", dest_dir.display());
     Ok(())
 }
@@ -623,7 +652,7 @@ pub fn uninstall(name: Option<&str>) -> Result<(), String> {
         Some(n) => n.to_string(),
         None => Manifest::load()?.project_name(),
     };
-    let p = super::data_dir().join("bin").join(format!("{n}.exe"));
+    let p = super::data_dir().join("bin").join(format!("{n}{EXE_SUFFIX}"));
     if p.exists() {
         fs::remove_file(&p).map_err(|e| e.to_string())?;
         println!("✅ 已卸载 {}", p.display());
